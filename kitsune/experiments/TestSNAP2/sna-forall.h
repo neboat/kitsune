@@ -100,6 +100,13 @@ class SNA {
     double wself;
 
    public:
+    void *operator new(size_t size) {
+        return (SNA *)__kitrt_cuMemAllocManaged(size);
+    }
+    void operator delete(void *ptr) {
+        __kitrt_cuMemFree(ptr);
+    }
+
     SNA(double rfac0_in, int twojmax_in, double rmin0_in, int switch_flag_in,
         int /*bzero_flag_in*/, int natoms, int nnbor) {
         wself = 1.0;
@@ -1532,7 +1539,6 @@ class SNA {
         //     forall (int kk = 0; kk < num_atoms_div; ++kk)
 	int num_tiles = (num_nbor * num_atoms_div + neighbors_per_tile - 1) / neighbors_per_tile;
         forall (int tile = 0; tile < num_tiles; ++tile) {
-	  /* printf("compute_cayley_klein_gpu: tile %d\n", tile); */
           int jj = (tile * neighbors_per_tile) % num_nbor;
           for (int j = jj; j < (jj + neighbors_per_tile); ++j)
             for (int i = 0; i < vector_length; ++i)

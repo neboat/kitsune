@@ -48,7 +48,7 @@ void atomicAdd(T* dest, T val) {
 /*     defined(KOKKOS_ENABLE_SYCL) || defined(KOKKOS_ENABLE_OPENMPTARGET) */
 #define SNAP_ENABLE_GPU
 /* #endif */
-#define KOKKOS_INLINE_FUNCTION inline
+#define KOKKOS_INLINE_FUNCTION inline __attribute__((always_inline))
 
 typedef double SNADOUBLE;
 struct alignas(2 * sizeof(SNADOUBLE)) SNAcomplex
@@ -119,6 +119,7 @@ public:
   size_t size = 0;
 
   View1D() = default;
+  __attribute__((always_inline))
   View1D([[gnu::unused]] std::string ignored, size_t s) : size(s) {
     if (!s) return;
     view = (T *)__kitrt_cuMemAllocManaged(sizeof(T) * size);
@@ -162,6 +163,7 @@ public:
   size_t size1 = 0, size2 = 0;
 
   View2D() = default;
+  __attribute__((always_inline))
   View2D([[gnu::unused]] std::string ignored, size_t s1, size_t s2)
     : size1(s1), size2(s2) {
     if (!(s1 * s2)) return;
@@ -198,6 +200,8 @@ public:
     return *this;
   }
 
+  T *data(void) const { return view; }
+
   size_t span(void) const { return size1 * size2; }
 
   void resize(size_t s1, size_t s2) {
@@ -225,6 +229,7 @@ public:
   size_t size1 = 0, size2 = 0, size3 = 0;
 
   View3D() = default;
+  __attribute__((always_inline))
   View3D([[gnu::unused]] std::string ignored, size_t s1, size_t s2, size_t s3)
     : size1(s1), size2(s2), size3(s3) {
     if (!(s1 * s2 * s3)) return;
@@ -263,12 +268,13 @@ public:
     return *this;
   }
 
+  T *data(void) const { return view; }
+
   size_t span(void) const { return size1 * size2 * size3; }
 
   void resize(size_t s1, size_t s2, size_t s3) {
     T *new_view = (T *)__kitrt_cuMemAllocManaged(sizeof(T) * s1 * s2 * s3);
 
-    
     if (view) {
       size_t min_s1 = (size1 > s1) ? s1 : size1;
       size_t min_s2 = (size2 > s2) ? s2 : size2;
@@ -295,6 +301,7 @@ public:
   size_t size1 = 0, size2 = 0, size3 = 0, size4 = 0;
 
   View4D() = default;
+  __attribute__((always_inline))
   View4D([[gnu::unused]] std::string ignored, size_t s1, size_t s2, size_t s3, size_t s4)
     : size1(s1), size2(s2), size3(s3), size4(s4) {
     if (!(s1 * s2 *s3 * s4)) return;
@@ -336,6 +343,8 @@ public:
     move.view = nullptr;
     return *this;
   }
+
+  T *data(void) const { return view; }
 
   size_t span(void) const { return size1 * size2 * size3 * size4; }
 };

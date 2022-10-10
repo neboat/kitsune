@@ -15,7 +15,7 @@ clang_flags=${cxx_flags} ${opt_flags} ${clang_info_flags}
 #
 kitsune_kokkos_flags = -fkokkos -fkokkos-no-init -I${kitsune_prefix}/include
 tapir_cu_launch_flags=-I${CUDA_HOME}/include
-tapir_cu_flags=-ftapir=cuda -mllvm -cuabi-verbose -mllvm -cuabi-arch=${NVARCH} ${tapir_cu_launch_flags} -mllvm -cuabi-opt-level=3
+tapir_cu_flags=-ftapir=cuda -mllvm -cuabi-verbose -mllvm -cuabi-arch=${NVARCH} ${tapir_cu_launch_flags} -mllvm -cuabi-opt-level=3 -mllvm -cuabi-keep-files
 # tapir_cu_flags=-ftapir=cuda -ffp-contract=fast -mllvm -cuabi-arch=${NVARCH} ${tapir_cu_launch_flags} -mllvm -cuabi-opt-level=3 -mllvm -cuabi-run-post-opts=false -mllvm -cuabi-disable-prefetch=true
 tapir_stripmine_flags=-mllvm -stripmine-count=1 -mllvm -stripmine-coarsen-factor=1 -mllvm -cuabi-default-grainsize=1
 ####
@@ -42,7 +42,7 @@ test_snap-kokkos.clang.${host_arch}: memory-kokkos.clang.${host_arch}.o sna-kokk
 	${clangxx} -o $@ $? ${kokkos_ld_flags} ${kokkos_ld_libs} -Xlinker -rpath=${kokkos_cu_prefix}/lib
 
 test_snap-forall.cuda.${host_arch}: memory.cpp sna-forall.cpp test_snap-forall.cpp 
-	${clangxx} ${test_snap_flags} ${clang_flags} -O1 ${tapir_cu_flags} ${tapir_stripmine_flags} -o $@ $? -Xlinker -rpath=${kitsune_prefix}/lib
+	${clangxx} ${test_snap_flags} ${clang_flags} ${tapir_cu_flags} ${tapir_stripmine_flags} -o $@ $? -Xlinker -rpath=${kitsune_prefix}/lib
 
 %-kokkos.clang.${host_arch}.o:%.cpp
 	${clangxx} ${test_snap_flags} ${clang_cuda_flags} ${kokkos_cu_flags} -c -o $@ $<
