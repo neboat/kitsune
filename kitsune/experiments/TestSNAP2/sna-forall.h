@@ -537,6 +537,9 @@ class SNA {
         atomicAdd(&(ylist(natom, jjdu).im), betaj * ztmp_i);
     }
 
+    // TODO: Add support for compiling this code with -ffast-math.
+    // Right now the floating-point functions (e.g., sin, cos) in here
+    // cause compiler crashes when compiling with -ffast-math.
     KOKKOS_INLINE_FUNCTION
     void operator()(const ComputeDUiTag, const int iter) const {
         int nbor = iter / num_atoms;
@@ -935,9 +938,11 @@ class SNA {
         const int tid = team_member.team_rank();
         const int tid_index = tid * PerTeamScratch;
 
+        // TODO: Add support for a nested forall here?
+
         // Kokkos::parallel_for(
         //     Kokkos::ThreadVectorRange(team_member, vector_length_loc),
-	for(int i = 0; i < vector_length_loc; ++i) {
+        for(int i = 0; i < vector_length_loc; ++i) {
             [&](const int natom_mod) {
                 int natom = natom_mod + natom_div * vector_length_loc;
                 if (natom >= num_atoms) return;
@@ -1189,6 +1194,7 @@ class SNA {
 #else
         int vector_length_loc = vector_length;
 #endif
+        // int vector_length_loc = 1;
 
         // Unflatten bend location (fastest), neighbor (middle), natom mod
         // vector_length (slowest)
@@ -1200,12 +1206,19 @@ class SNA {
         if (jbend >= (twojmax + 1)) return;
         if (nbor >= num_nbor) return;
 
+        // NOTE: This code has been adapted to work with the way we
+        // allocate scratch space.  Revisit this logic if we change
+        // how we handle scratch space.
+
         // caching buffers for ulist, dulist
         const int PerTeamScratch = vector_length_loc * (twojmax + 1);
         ScratchViewType ulist_scratch(team_member.team_scratch(0),
                                       team_member.team_size() * PerTeamScratch);
+        /* ScratchViewType dulist_scratch( */
+        /*     team_member.team_scratch(0), */
+        /*     team_member.team_size() * PerTeamScratch); */
         ScratchViewType dulist_scratch(
-            team_member.team_scratch(0),
+            team_member.team_scratch(1),
             team_member.team_size() * PerTeamScratch);
 
         // thread id's and the index for the start of the buffer
@@ -1213,9 +1226,11 @@ class SNA {
         const int tid = team_member.team_rank();
         const int tid_index = tid * PerTeamScratch;
 
+        // TODO: Add support for a nested forall here?
+
         // Kokkos::parallel_for(
         //     Kokkos::ThreadVectorRange(team_member, vector_length_loc),
-	for(int i = 0; i < vector_length_loc; ++i) {
+        for(int i = 0; i < vector_length_loc; ++i) {
             [&](const int natom_mod) {
                 int natom = natom_mod + natom_div * vector_length_loc;
                 if (natom >= num_atoms) return;
@@ -1426,6 +1441,7 @@ class SNA {
                     &(dedr(natom_mod + vector_length_loc * natom_div, nbor,
                            dir)),
                     2. * dedr_sum);
+
             }(i);}
     }
 
@@ -1436,13 +1452,15 @@ class SNA {
         // auto policy_InitUlisttot =
         //     Kokkos::RangePolicy<InitUlisttotTag>(0, num_atoms * idxu_max);
         // Kokkos::parallel_for("InitUlisttot", policy_InitUlisttot, *this);
+        /* for(int i = 0; i < num_atoms * idxu_max; ++i) */
         forall(int i = 0; i < num_atoms * idxu_max; ++i)
-	  this->operator()(InitUlisttotTag(), i);
+          this->operator()(InitUlisttotTag(), i);
 
         // auto policy_InitUlist = Kokkos::RangePolicy<InitUlistTag>(0, nTotal);
         // Kokkos::parallel_for("InitUlist", policy_InitUlist, *this);
+        /* for(int i = 0; i < nTotal; ++i) */
         forall(int i = 0; i < nTotal; ++i)
-	  this->operator()(InitUlistTag(), i);
+          this->operator()(InitUlistTag(), i);
     }
 
     /* ---------------------------------------------------------------------- */
@@ -1451,8 +1469,9 @@ class SNA {
         //     Kokkos::RangePolicy<AddSelfUarraytotTag>(0, num_atoms * jdim);
         // Kokkos::parallel_for("AddSelfUarraytot", policy_AddSelfUarraytot,
         //                      *this);
+        /* for(int i = 0; i < num_atoms * jdim; ++i) */
         forall(int i = 0; i < num_atoms * jdim; ++i)
-	  this->operator()(AddSelfUarraytotTag(), i);
+          this->operator()(AddSelfUarraytotTag(), i);
     }
 
     /* ----------------------------------------------------------------------
@@ -1469,8 +1488,9 @@ class SNA {
         //     Kokkos::TeamPolicy<ComputeUiTag>(numBlocks, numThreads);
 
         // Kokkos::parallel_for("ComputeUi", policy_Ui, *this);
+        /* for(int i = 0; i < numBlocks; ++i) */
         forall(int i = 0; i < numBlocks; ++i)
-	  this->operator()(ComputeUiTag(), member_type(i, numThreads, 1));
+          this->operator()(ComputeUiTag(), member_type(i, numThreads, 1));
 
         // Kokkos::fence();
     }
@@ -1483,14 +1503,16 @@ class SNA {
         //     "ComputeYiInit",
         //     Kokkos::RangePolicy<ComputeYiInitTag>(0, num_atoms * idxdu_max),
         //     *this);
+        /* for(int i = 0; i < num_atoms * idxdu_max; ++i) */
         forall(int i = 0; i < num_atoms * idxdu_max; ++i)
-	  this->operator()(ComputeYiInitTag(), i);
+          this->operator()(ComputeYiInitTag(), i);
 
         // auto policy_Yi =
         //     Kokkos::RangePolicy<ComputeYiTag>(0, num_atoms * idxz_max);
         // Kokkos::parallel_for("ComputeYi", policy_Yi, *this);
+        /* for(int i = 0; i < num_atoms * idxz_max; ++i) */
         forall(int i = 0; i < num_atoms * idxz_max; ++i)
-	  this->operator()(ComputeYiTag(), i);
+          this->operator()(ComputeYiTag(), i);
 
         // Kokkos::fence();
     }
@@ -1501,8 +1523,9 @@ class SNA {
     void compute_duarray() {
         // auto policy_DUi = Kokkos::RangePolicy<ComputeDUiTag>(0, nTotal);
         // Kokkos::parallel_for("ComputeDUi", policy_DUi, *this);
+        /* for(int i = 0; i < nTotal; ++i) */
         forall(int i = 0; i < nTotal; ++i)
-	  this->operator()(ComputeDUiTag(), i);
+          this->operator()(ComputeDUiTag(), i);
 
         // Kokkos::fence();
     }
@@ -1514,7 +1537,7 @@ class SNA {
         // auto policy_DEi = Kokkos::RangePolicy<ComputeDEiTag>(0, nTotal);
         // Kokkos::parallel_for("ComputeDEi", policy_DEi, *this);
         forall(int i = 0; i < nTotal; ++i)
-	  this->operator()(ComputeDEiTag(), i);
+          this->operator()(ComputeDEiTag(), i);
         // Kokkos::fence();
     }
 
@@ -1534,17 +1557,22 @@ class SNA {
         //     Policy3D({0, 0, 0}, {vector_length, num_nbor, num_atoms_div},
         //              {vector_length, neighbors_per_tile, 1});
         // Kokkos::parallel_for("ComputeCayleyKleinGPU", policy_ck, *this);
-        // forall (int ii = 0; ii < vector_length; ii += vector_length)
-        //   forall (int jj = 0; jj < num_nbor; jj += neighbors_per_tile)
-        //     forall (int kk = 0; kk < num_atoms_div; ++kk)
-	int num_tiles = (num_nbor * num_atoms_div + neighbors_per_tile - 1) / neighbors_per_tile;
+
+        // TODO: Add support for nested forall's.
+
+        const int nbor_tiles = (num_nbor + neighbors_per_tile - 1) / neighbors_per_tile;
+        const int num_tiles = num_atoms_div * nbor_tiles;
+        // for (int tile = 0; tile < num_tiles; ++tile) {
         forall (int tile = 0; tile < num_tiles; ++tile) {
-          int jj = (tile * neighbors_per_tile) % num_nbor;
-          for (int j = jj; j < (jj + neighbors_per_tile); ++j)
-            for (int i = 0; i < vector_length; ++i)
-              this->operator()(ComputeCayleyKleinTagGPU(), i, j,
-			       (tile * neighbors_per_tile) / num_nbor);
+          const int natom_div = tile / nbor_tiles;
+          const int nbor_tile = tile % nbor_tiles;
+          for (int nbor = nbor_tile * neighbors_per_tile;
+               nbor < (nbor_tile + 1) * neighbors_per_tile; ++nbor)
+            for (int natom_mod = 0; natom_mod < vector_length; ++natom_mod)
+              this->operator()(ComputeCayleyKleinTagGPU(), natom_mod, nbor,
+                               natom_div);
         }
+
         // Kokkos::fence();
     }
 
@@ -1562,16 +1590,21 @@ class SNA {
             //     Policy3D({0, 0, 0}, {vector_length, twojmax + 1, num_atoms_div},
             //              {vector_length, jvalues_per_tile, 1});
             // Kokkos::parallel_for("PreUiGPU", policy_pre_ui, *this);
-            // forall(int ii = 0; ii < vector_length; ii += vector_length)
-            //   forall(int jj = 0; jj < twojmax + 1; jj += jvalues_per_tile)
-            //     forall(int kk = 0; kk < num_atoms_div; kk += 1)
-	    int num_tiles = ((twojmax + 1) * num_atoms_div + jvalues_per_tile - 1) / jvalues_per_tile;
+
+            // TODO: Add support for nested forall's.
+
+            const int j_tiles = ((twojmax + 1) + jvalues_per_tile - 1) / jvalues_per_tile;
+            const int num_tiles = num_atoms_div * j_tiles;
+            // for (int tile = 0; tile < num_tiles; ++tile) {
             forall (int tile = 0; tile < num_tiles; ++tile) {
-              int jj = (tile * jvalues_per_tile) % (twojmax + 1);
-              for (int j = jj; j < (jj + jvalues_per_tile); ++j)
-                for (int i = 0; i < vector_length; ++i)
-                  this->operator()(PreUiTagGPU(), i, j, (tile * jvalues_per_tile) / (twojmax + 1));
+              const int natom_div = tile / j_tiles;
+              const int j_tile = tile % j_tiles;
+              for (int j = j_tile * jvalues_per_tile;
+                   j < (j_tile + 1) * jvalues_per_tile; ++j)
+                for (int natom_mod = 0; natom_mod < vector_length; ++natom_mod)
+                  this->operator()(PreUiTagGPU(), natom_mod, j, natom_div);
             }
+
             // Kokkos::fence();
         }
 
@@ -1590,17 +1623,30 @@ class SNA {
             // scratch size = vector_length * (twojmax + 1) for cache
             const int scratch_level = 0;
             const int PerTeamScratch = vector_length * (twojmax + 1);
-	    View1D<SNAcomplex> scratch("", num_teams * PerTeamScratch);
             // int scratch_size =
             //     ScratchViewType::shmem_size(team_size * PerTeamScratch);
             // policy_Ui = policy_Ui.set_scratch_size(scratch_level,
             //                                        PerTeam(scratch_size));
 
+            // TODO: Add support for allocating scratch space on the
+            // device, maybe via a dyanmic allocation call within the kernel?
+
+            SNAcomplex *scratch =
+              (SNAcomplex *)__kitrt_cuMemAllocManaged(sizeof(SNAcomplex) * PerTeamScratch * team_size * num_teams_div);
             // Kokkos::parallel_for("ComputeUiGPU", policy_Ui, *this);
-            forall (int i = 0; i < num_teams_div; ++i)
-              for (int j = 0; j < vector_length; ++j)
+            forall (int i = 0; i < num_teams_div; ++i) {
+            // for (int i = 0; i < num_teams_div; ++i) {
+              // SNAcomplex *scratch = (SNAcomplex *)malloc(sizeof(SNAcomplex) * PerTeamScratch * team_size);
+              for (int j = 0; j < team_size; ++j)
                 this->operator()(ComputeUiTagGPU(),
-				 member_type(i, team_size, j, scratch.data(), PerTeamScratch));
+                                 member_type(i, team_size, j,
+                                             scratch + (i * PerTeamScratch * team_size),
+                                             PerTeamScratch));
+                // this->operator()(ComputeUiTagGPU(),
+                //               member_type(i, team_size, j, scratch, PerTeamScratch));
+              // free(scratch);
+            }
+            __kitrt_cuMemFree((void *)scratch);
             // Kokkos::fence();
         }
 
@@ -1614,16 +1660,21 @@ class SNA {
             //     Policy3D({0, 0, 0}, {vector_length, idxu_max, num_atoms_div},
             //              {vector_length, idxu_per_tile, 1});
             // Kokkos::parallel_for("TransformUiGPU", policy_transform_ui, *this);
-            // forall (int ii = 0; ii < vector_length; ii ++ vector_length)
-            //   forall (int jj = 0; jj < idxu_max; jj += idxu_per_tile)
-            //     forall (int kk = 0; kk < num_atoms_div; kk += 1)
-	    int num_tiles = ((idxu_max * num_atoms_div) + idxu_per_tile - 1) / idxu_per_tile;
+
+            // TODO: Add support for nested forall's.
+
+            const int idxu_tiles = (idxu_max + idxu_per_tile - 1) / idxu_per_tile;
+            const int num_tiles = num_atoms_div * idxu_tiles;
             forall (int tile = 0; tile < num_tiles; ++tile) {
-              int jj = (tile * idxu_per_tile) % idxu_max;
-              for (int j = jj; j < (jj + idxu_per_tile); ++j)
-                for (int i = 0; i < vector_length; ++i)
-                  this->operator()(TransformUiTagGPU(), i, j, (tile * idxu_per_tile) / idxu_max);
+            // for (int tile = 0; tile < num_tiles; ++tile) {
+              const int natom_div = tile / idxu_tiles;
+              const int idxu_tile = tile % idxu_tiles;
+              for (int idxu = idxu_tile * idxu_per_tile;
+                   idxu < (idxu_tile + 1) * idxu_per_tile; ++idxu)
+                for (int natom_mod = 0; natom_mod < vector_length; ++natom_mod)
+                  this->operator()(TransformUiTagGPU(), natom_mod, idxu, natom_div);
             }
+
             // Kokkos::fence();
         }
     }
@@ -1642,13 +1693,21 @@ class SNA {
         //     Policy3D({0, 0, 0}, {vector_length, idxz_max, num_atoms_div},
         //              {vector_length, jjz_per_tile, 1});
         // Kokkos::parallel_for("ComputeYiGPU", policy_Yi, *this);
-	int num_tiles = ((idxz_max * num_atoms_div) + jjz_per_tile - 1) / jjz_per_tile;
+
+        // TODO: Add support for nested forall's.
+
+        const int jjz_tiles = (idxz_max + jjz_per_tile - 1) / jjz_per_tile;
+        const int num_tiles = num_atoms_div * jjz_tiles;
+        // for (int tile = 0; tile < num_tiles; ++tile) {
         forall (int tile = 0; tile < num_tiles; ++tile) {
-          int jj = (tile * jjz_per_tile) % idxz_max;
-          for (int j = jj; j < (jj + jjz_per_tile); ++j)
-            for (int i = 0; i < vector_length; ++i)
-              this->operator()(ComputeYiTagGPU(), i, j, (tile * jjz_per_tile) / idxz_max);
+          const int natom_div = tile / jjz_tiles;
+          const int jjz_tile = tile % jjz_tiles;
+          for (int jjz = jjz_tile * jjz_per_tile;
+               jjz < (jjz_tile + 1) * jjz_per_tile; ++jjz)
+            for (int natom_mod = 0; natom_mod < vector_length; ++natom_mod)
+              this->operator()(ComputeYiTagGPU(), natom_mod, jjz, natom_div);
         }
+
         // Kokkos::fence();
     }
 
@@ -1664,6 +1723,9 @@ class SNA {
         int num_teams = num_atoms_div * num_nbor * (twojmax + 1);
         int num_teams_div = (num_teams + team_size - 1) / team_size;
 
+        // TODO: Add support for launching GPU kernels without waiting
+        // for them to synchronize immedaitely afterwards.
+
         // scratch size = 2 * vector_length * (twojmax + 1) for cache
         const int scratch_level = 0;
         const int PerTeamScratch = 2 * vector_length * (twojmax + 1);
@@ -1676,15 +1738,28 @@ class SNA {
             //         num_teams_div, team_size, vector_length);
             // policy_fused_deidrj = policy_fused_deidrj.set_scratch_size(
             //     scratch_level, PerTeam(scratch_size));
-	    View1D<SNAcomplex> scratch("", num_teams * PerTeamScratch);
 
             // Kokkos::parallel_for("ComputeFusedDeiDrjGPU<0>",
             //                      policy_fused_deidrj, *this);
+
+            // TODO: Add support for allocating scratch space on the
+            // device, maybe via a dyanmic allocation call within the kernel?
+
+            SNAcomplex *scratch =
+              (SNAcomplex *)__kitrt_cuMemAllocManaged(sizeof(SNAcomplex) * PerTeamScratch * team_size * num_teams_div);
+            // for (int i = 0; i < num_teams_div; ++i) {
             forall (int i = 0; i < num_teams_div; ++i) {
-              for (int j = 0; j < vector_length; ++j)
+              // SNAcomplex *scratch = (SNAcomplex *)malloc(sizeof(SNAcomplex) * PerTeamScratch * team_size);
+              for (int j = 0; j < team_size; ++j)
+                // this->operator()(ComputeFusedDeiDrjTagGPU<0>(),
+                //               member_type(i, team_size, j, scratch, PerTeamScratch));
                 this->operator()(ComputeFusedDeiDrjTagGPU<0>(),
-				 member_type(i, team_size, j, scratch.data(), PerTeamScratch));
-	    }
+                                 member_type(i, team_size, j,
+                                             scratch + (i * PerTeamScratch * team_size),
+                                             PerTeamScratch));
+              // free(scratch);
+            }
+            __kitrt_cuMemFree((void *)scratch);
         }
 
         {
@@ -1693,15 +1768,28 @@ class SNA {
             //         num_teams_div, team_size, vector_length);
             // policy_fused_deidrj = policy_fused_deidrj.set_scratch_size(
             //     scratch_level, PerTeam(scratch_size));
-	    View1D<SNAcomplex> scratch("", num_teams * PerTeamScratch);
 
             // Kokkos::parallel_for("ComputeFusedDeiDrjGPU<1>",
             //                      policy_fused_deidrj, *this);
-            forall (int i = 0; i < num_teams_div; ++i)
-              for (int j = 0; j < vector_length; ++j)
-                this->operator()(ComputeFusedDeiDrjTagGPU<1>(),
-				 member_type(i, team_size, j, scratch.data(), PerTeamScratch));
 
+            // TODO: Add support for allocating scratch space on the
+            // device, maybe via a dyanmic allocation call within the kernel?
+
+            SNAcomplex *scratch =
+              (SNAcomplex *)__kitrt_cuMemAllocManaged(sizeof(SNAcomplex) * PerTeamScratch * team_size * num_teams_div);
+            // for (int i = 0; i < num_teams_div; ++i) {
+            forall (int i = 0; i < num_teams_div; ++i) {
+              // SNAcomplex *scratch = (SNAcomplex *)malloc(sizeof(SNAcomplex) * PerTeamScratch * team_size);
+              for (int j = 0; j < team_size; ++j)
+                // this->operator()(ComputeFusedDeiDrjTagGPU<1>(),
+                //               member_type(i, team_size, j, scratch, PerTeamScratch));
+                this->operator()(ComputeFusedDeiDrjTagGPU<1>(),
+                                 member_type(i, team_size, j,
+                                             scratch + (i * PerTeamScratch * team_size),
+                                             PerTeamScratch));
+              // free(scratch);
+            }
+            __kitrt_cuMemFree((void *)scratch);
         }
 
         {
@@ -1710,14 +1798,28 @@ class SNA {
             //         num_teams_div, team_size, vector_length);
             // policy_fused_deidrj = policy_fused_deidrj.set_scratch_size(
             //     scratch_level, PerTeam(scratch_size));
-	    View1D<SNAcomplex> scratch("", num_teams * PerTeamScratch);
 
             // Kokkos::parallel_for("ComputeFusedDeiDrjGPU<2>",
             //                      policy_fused_deidrj, *this);
-            forall (int i = 0; i < num_teams_div; ++i)
-              for (int j = 0; j < vector_length; ++j)
+
+            // TODO: Add support for allocating scratch space on the
+            // device, maybe via a dyanmic allocation call within the kernel?
+
+            SNAcomplex *scratch =
+              (SNAcomplex *)__kitrt_cuMemAllocManaged(sizeof(SNAcomplex) * PerTeamScratch * team_size * num_teams_div);
+            // for (int i = 0; i < num_teams_div; ++i) {
+            forall (int i = 0; i < num_teams_div; ++i) {
+              // SNAcomplex *scratch = (SNAcomplex *)malloc(sizeof(SNAcomplex) * PerTeamScratch * team_size);
+              for (int j = 0; j < team_size; ++j)
+                // this->operator()(ComputeFusedDeiDrjTagGPU<2>(),
+                //               member_type(i, team_size, j, scratch, PerTeamScratch));
                 this->operator()(ComputeFusedDeiDrjTagGPU<2>(),
-				 member_type(i, team_size, j, scratch.data(), PerTeamScratch));
+                                 member_type(i, team_size, j,
+                                             scratch + (i * PerTeamScratch * team_size),
+                                             PerTeamScratch));
+              // free(scratch);
+            }
+            __kitrt_cuMemFree((void *)scratch);
         }
 
         // Kokkos::fence();

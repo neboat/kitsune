@@ -211,11 +211,9 @@ void init() {
     //  Kokkos::resize(f, ntotal,3);
     //  f.resize(ntotal, 3);
 
-    // fprintf(stderr, "ncoeff %d\n", ncoeff);
     snaptr->coeffi = new SNADOUBLE[ncoeff + 1];
 
     for (int icoeff = 0; icoeff < ncoeff + 1; icoeff++){
-      // fprintf(stderr, "refdata.coeff[%d] = %f\n", icoeff, refdata.coeff[icoeff]);
         snaptr->coeffi[icoeff] = refdata.coeff[icoeff];
     }
 

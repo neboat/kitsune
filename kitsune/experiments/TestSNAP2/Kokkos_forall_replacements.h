@@ -38,10 +38,9 @@
 
 template<typename T>
 void atomicAdd(T* dest, T val) {
-  // TODO: Fix this code to add val into *dest atomically.  Note that
-  // this requires atomic-add support for doubles.
+  // NOTE: std::atomic<double> requires C++20.
   // std::atomic<T>::fetch_add((_Atomic T*)dest, val);
-  *dest += val;
+  __atomic_fetch_add(dest, val, __ATOMIC_SEQ_CST);
 }
 
 /* #if defined(KOKKOS_ENABLE_CUDA) || defined(KOKKOS_ENABLE_HIP) || \ */
@@ -85,12 +84,12 @@ struct alignas(2 * sizeof(SNADOUBLE)) SNAcomplex
     im += src.im;
   }
 
-  KOKKOS_INLINE_FUNCTION
-  void operator*=(const SNAcomplex src)
-  {
-    re += src.re;
-    im += src.im;
-  }
+  // KOKKOS_INLINE_FUNCTION
+  // void operator*=(const SNAcomplex src)
+  // {
+  //   re += src.re;
+  //   im += src.im;
+  // }
 };
 
 // Struct used to "unfold" ulisttot on the gpu
@@ -113,39 +112,44 @@ struct alignas(8) FullHalfMap {
 // using Kokkos::TeamThreadRange;
 // using Kokkos::ThreadVectorRange;
 
-template<typename T> class View1D {
-public:
-  T *view = nullptr;
-  size_t size = 0;
+// Custom replacements for View types used in original Kokkos code.
 
+template<typename T> class View1D {
+  T *__restrict__ view = nullptr;
+  size_t size = 0;
+  void destroy() {
+    if (view) {
+      for (size_t i = 0; i < size; ++i)
+        view[i].~T();
+      __kitrt_cuMemFree((void *)view);
+    }
+  }
+
+public:
   View1D() = default;
   __attribute__((always_inline))
   View1D([[gnu::unused]] std::string ignored, size_t s) : size(s) {
     if (!s) return;
-    view = (T *)__kitrt_cuMemAllocManaged(sizeof(T) * size);
+    view = new(__kitrt_cuMemAllocManaged(sizeof(T) * size)) T[size];
   }
   ~View1D() {
-    if (view)
-      __kitrt_cuMemFree((void *)view);
+    destroy();
     view = nullptr;
   }
 
-  // T &operator()(size_t idx) { return view[idx]; }
+  // NOTE: This type signature allows us to mutate the data within a
+  // view inside of const methods.
   T &operator()(size_t idx) const { return view[idx]; }
-
-  // T &operator[](size_t idx) { return view[idx]; }
   T &operator[](size_t idx) const { return view[idx]; }
 
   View1D &operator=(const View1D &copy) {
-    if (view)
-      __kitrt_cuMemFree((void *)view);
-    view = copy.view;
+    destroy();
+    view = std::move(copy.view);
     size = copy.size;
     return *this;
   }
   View1D &operator=(View1D &&move) {
-    if (view)
-      __kitrt_cuMemFree((void *)view);
+    destroy();
     view = move.view;
     size = move.size;
     move.view = nullptr;
@@ -158,41 +162,45 @@ public:
 };
 
 template<typename T> class View2D {
-public:
-  T *view = nullptr;
+  T *__restrict__ view = nullptr;
   size_t size1 = 0, size2 = 0;
+  void destroy() {
+    if (view) {
+      for (size_t i = 0; i < size1 * size2; ++i)
+        view[i].~T();
+      __kitrt_cuMemFree((void *)view);
+    }
+  }
 
+public:
   View2D() = default;
   __attribute__((always_inline))
   View2D([[gnu::unused]] std::string ignored, size_t s1, size_t s2)
     : size1(s1), size2(s2) {
     if (!(s1 * s2)) return;
-    view = (T *)__kitrt_cuMemAllocManaged(sizeof(T) * size1 * size2);
+    view = new(__kitrt_cuMemAllocManaged(sizeof(T) * size1 * size2))
+      T[size1 * size2];
   }
   ~View2D() {
-    if (view)
-      __kitrt_cuMemFree((void *)view);
+    destroy();
     view = nullptr;
   }
 
-  // T &operator()(size_t idx1, size_t idx2) {
-  //   return view[idx1 * size2 + idx2];
-  // }
+  // NOTE: This type signature allows us to mutate the data within a
+  // view inside of const methods.
   T &operator()(size_t idx1, size_t idx2) const {
     return view[idx1 * size2 + idx2];
   }
 
   View2D &operator=(const View2D &copy) {
-    if (view)
-      __kitrt_cuMemFree((void *)view);
+    destroy();
     view = copy.view;
     size1 = copy.size1;
     size2 = copy.size2;
     return *this;
   }
   View2D &operator=(View2D &&move) {
-    if (view)
-      __kitrt_cuMemFree((void *)view);
+    destroy();
     view = move.view;
     size1 = move.size1;
     size2 = move.size2;
@@ -211,10 +219,10 @@ public:
       size_t min_s1 = (size1 > s1) ? s1 : size1;
       size_t min_s2 = (size2 > s2) ? s2 : size2;
       for (size_t i = 0; i < min_s1; ++i)
-	for (size_t j = 0; j < min_s2; ++j)
-	  new_view[i * s2 + j] = view[i * size2 + j];
+        for (size_t j = 0; j < min_s2; ++j)
+          new_view[i * s2 + j] = view[i * size2 + j];
 
-      __kitrt_cuMemFree((void *)view);
+      destroy();
     }
 
     view = new_view;
@@ -224,33 +232,38 @@ public:
 };
 
 template<typename T> class View3D {
-public:
-  T *view = nullptr;
+  T *__restrict__ view = nullptr;
   size_t size1 = 0, size2 = 0, size3 = 0;
+  void destroy() {
+    if (view) {
+      for (size_t i = 0; i < size1 * size2 * size3; ++i)
+        view[i].~T();
+      __kitrt_cuMemFree((void *)view);
+    }
+  }
 
+public:
   View3D() = default;
   __attribute__((always_inline))
   View3D([[gnu::unused]] std::string ignored, size_t s1, size_t s2, size_t s3)
     : size1(s1), size2(s2), size3(s3) {
     if (!(s1 * s2 * s3)) return;
-    view = (T *)__kitrt_cuMemAllocManaged(sizeof(T) * size1 * size2 * size3);
+    view = new(__kitrt_cuMemAllocManaged(sizeof(T) * size1 * size2 * size3))
+      T[size1 * size2 * size3];
   }
   ~View3D() {
-    if (view)
-      __kitrt_cuMemFree((void *)view);
+    destroy();
     view = nullptr;
   }
 
-  // T &operator()(size_t idx1, size_t idx2, size_t idx3) {
-  //   return view[(idx1 * size2 * size3) + (idx2 * size3) + idx3];
-  // }
+  // NOTE: This type signature allows us to mutate the data within a
+  // view inside of const methods.
   T &operator()(size_t idx1, size_t idx2, size_t idx3) const {
     return view[(idx1 * size2 * size3) + (idx2 * size3) + idx3];
   }
 
   View3D &operator=(const View3D &copy) {
-    if (view)
-      __kitrt_cuMemFree((void *)view);
+    destroy();
     view = copy.view;
     size1 = copy.size1;
     size2 = copy.size2;
@@ -258,8 +271,7 @@ public:
     return *this;
   }
   View3D &operator=(View3D &&move) {
-    if (view)
-      __kitrt_cuMemFree((void *)view);
+    destroy();
     view = move.view;
     size1 = move.size1;
     size2 = move.size2;
@@ -280,12 +292,12 @@ public:
       size_t min_s2 = (size2 > s2) ? s2 : size2;
       size_t min_s3 = (size3 > s3) ? s3 : size3;
       for (size_t i = 0; i < min_s1; ++i)
-	for (size_t j = 0; j < min_s2; ++j)
-	  for (size_t k = 0; j < min_s3; ++j)
-	    new_view[(i * s2 * s3) + (j * s3) + k] =
-	      view[(i * size2 * size3) + (j * size3) + k];
+        for (size_t j = 0; j < min_s2; ++j)
+          for (size_t k = 0; j < min_s3; ++j)
+            new_view[(i * s2 * s3) + (j * s3) + k] =
+              view[(i * size2 * size3) + (j * size3) + k];
 
-      __kitrt_cuMemFree((void *)view);
+      destroy();
     }
 
     view = new_view;
@@ -296,35 +308,39 @@ public:
 };
 
 template<typename T> class View4D {
-public:
-  T *view = nullptr;
+  T *__restrict__ view = nullptr;
   size_t size1 = 0, size2 = 0, size3 = 0, size4 = 0;
+  void destroy() {
+    if (view) {
+      for (size_t i = 0; i < size1 * size2 * size3 * size4; ++i)
+        view[i].~T();
+      __kitrt_cuMemFree((void *)view);
+    }
+  }
+public:
 
   View4D() = default;
   __attribute__((always_inline))
   View4D([[gnu::unused]] std::string ignored, size_t s1, size_t s2, size_t s3, size_t s4)
     : size1(s1), size2(s2), size3(s3), size4(s4) {
     if (!(s1 * s2 *s3 * s4)) return;
-    view = (T *)__kitrt_cuMemAllocManaged(sizeof(T) * size1 * size2 * size3 * size4);
+    view = new(__kitrt_cuMemAllocManaged(sizeof(T) * size1 * size2 * size3 * size4))
+      T[size1 * size2 * size3 * size4];
   }
   ~View4D() {
-    if (view)
-      __kitrt_cuMemFree((void *)view);
+    destroy();
     view = nullptr;
   }
 
-  // T &operator()(size_t idx1, size_t idx2, size_t idx3, size_t idx4) {
-  //   return view[(idx1 * size2 * size3 * size4) + (idx2 * size3 * size4) +
-  // 		(idx3 * size4) + idx4];
-  // }
+  // NOTE: This type signature allows us to mutate the data within a
+  // view inside of const methods.
   T &operator()(size_t idx1, size_t idx2, size_t idx3, size_t idx4) const {
     return view[(idx1 * size2 * size3 * size4) + (idx2 * size3 * size4) +
-		(idx3 * size4) + idx4];
+                (idx3 * size4) + idx4];
   }
 
   View4D &operator=(const View4D &copy) {
-    if (view)
-      __kitrt_cuMemFree((void *)view);
+    destroy();
     view = copy.view;
     size1 = copy.size1;
     size2 = copy.size2;
@@ -333,8 +349,7 @@ public:
     return *this;
   }
   View4D &operator=(View4D &&move) {
-    if (view)
-      __kitrt_cuMemFree((void *)view);
+    destroy();
     view = move.view;
     size1 = move.size1;
     size2 = move.size2;
@@ -423,12 +438,14 @@ using HostFullHalfMap_View1D = FullHalfMap_View1D;
 
 // scratch memory views for SNAcomplex
 /* using ScratchViewType = View<SNAcomplex *, ExecSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>; */
-// TODO: We should use device-side scratch memory for this storage,
-// but I'm not sure how to do that right now.
+// TODO: We should use device-side scratch memory for this storage.
+// Right now we manually allocate scratch space in UVM using __kitrt
+// methods.  We should reconsider how we handle scratch-space
+// allocations.
 class ScratchViewType {
   using T = SNAcomplex;
 public:
-  T *view = nullptr;
+  T *__restrict__ view = nullptr;
   size_t size = 0;
 
   ScratchViewType() = default;
@@ -440,34 +457,39 @@ public:
     view = nullptr;
   }
 
-  T &operator()(size_t idx) const { return view[idx]; }
+  T &operator()(size_t idx) { return view[idx]; }
+  const T &operator()(size_t idx) const { return view[idx]; }
 
-  T &operator[](size_t idx) const { return view[idx]; }
+  T &operator[](size_t idx) { return view[idx]; }
+  const T &operator[](size_t idx) const { return view[idx]; }
 
   T *data(void) const { return view; }
 
-  size_t span(void) const { return size; }  
+  size_t span(void) const { return size; }
 };
 
 
 // Custom replacement for member_type class.
 class member_type {
-  int _league_rank = 0, _team_size = 0, _team_rank = 0, _per_team_scratch_size = 0;
+  int _league_rank = 0, _team_size = 0, _team_rank = 0;
+  int _per_team_scratch_size = 0;
   SNAcomplex *scratch_alloc = nullptr;
 public:
   member_type(int lrank, int tsize, int trank)
     : _league_rank(lrank), _team_size(tsize), _team_rank(trank) {}
   member_type(int lrank, int tsize, int trank, SNAcomplex *scratch,
-	      int per_team_scratch_size)
+              int per_team_scratch_size)
     : _league_rank(lrank), _team_size(tsize), _team_rank(trank),
-      scratch_alloc(scratch), _per_team_scratch_size(per_team_scratch_size) {}
+      scratch_alloc(scratch),
+      _per_team_scratch_size(per_team_scratch_size) {}
 
   int league_rank() const { return _league_rank; }
   int team_size() const { return _team_size; }
   int team_rank() const { return _team_rank; }
 
   SNAcomplex *team_scratch(int i) const {
-    return &scratch_alloc[_league_rank * _per_team_scratch_size];
+    // return &scratch_alloc[_league_rank * _per_team_scratch_size];
+    return &scratch_alloc[i * _per_team_scratch_size];
   }
 };
 

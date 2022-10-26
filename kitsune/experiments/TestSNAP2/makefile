@@ -34,7 +34,8 @@ kokkos_nvcc_flags=-I${kokkos_cu_prefix}/include ${nvcc_cxx_flags} ${opt_flags} -
 
 #### TestSNAP-specific stuff
 ref_data=14
-test_snap_flags=-DREFDATA_TWOJ=${ref_data} -std=c++17 -DKOKKOS_ENABLE_CXX17
+# TODO: Add support to compile the forall code with -ffast-math.
+test_snap_flags=-DREFDATA_TWOJ=${ref_data} -std=c++17 -DKOKKOS_ENABLE_CXX17 # -ffast-math
 
 all: test_snap-kokkos.clang.${host_arch} test_snap-forall.cuda.${host_arch}
 
