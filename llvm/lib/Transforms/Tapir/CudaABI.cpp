@@ -60,6 +60,7 @@
 
 #include "llvm/Transforms/Tapir/CudaABI.h"
 #include "kitsune/Config/config.h"
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/IR/Constants.h"
@@ -320,6 +321,7 @@ std::string PTXVersionFromCudaVersion() {
           .Case("12.3", "+ptx83")
           .Case("12.4", "+ptx83")
           .Case("12.5", "+ptx83")
+          .Case("12.8", "+ptx83")
           .Default("");
 
   if (PTXVersionStr == "") {
@@ -824,6 +826,8 @@ void CudaLoop::postProcessOutline(TapirLoopInfo &TLI, TaskOutlineInfo &Out,
          "End argument not used in condition!");
   ClonedCond->setOperand(TripCountIdx, ThreadEnd);
 
+  fixReducersInKernel(KernelF, ThreadIdx, BlockDim);
+
   if (KeepIntermediateFiles) {
     std::error_code EC;
     std::unique_ptr<ToolOutputFile> PostLoopIRFile;
@@ -832,6 +836,324 @@ void CudaLoop::postProcessOutline(TapirLoopInfo &TLI, TaskOutlineInfo &Out,
         IRFileName, EC, sys::fs::OpenFlags::OF_None);
     KernelModule.print(PostLoopIRFile->os(), nullptr);
     PostLoopIRFile->keep();
+  }
+}
+
+void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
+                                   Value *BlockDim) {
+  BasicBlock *Entry = &KernelF->getEntryBlock();
+  BasicBlock *Exit = [&] {
+    SmallSet<BasicBlock *, 8> Terminators;
+    for (BasicBlock &BB : *KernelF) {
+      if (isa<ReturnInst>(BB.getTerminator())) {
+        Terminators.insert(&BB);
+      }
+    }
+    if (Terminators.size() == 1) {
+      return *Terminators.begin();
+    }
+    // This branch is probably here just for correctness. It seems that Kernel
+    // functions outlined by LoopSpawning already have a single exit block. But
+    // in the rare event that it does not, create a new exit block and link all
+    // terminators to it.
+    BasicBlock *NewExit =
+        BasicBlock::Create(KernelF->getContext(), "exit", KernelF);
+    for (BasicBlock *T : Terminators) {
+      ReplaceInstWithInst(T->getTerminator(), BranchInst::Create(NewExit));
+    }
+    return NewExit;
+  }();
+
+  struct ReductionVarInfo {
+    Value *LocalPtr; // Holds the thread-local copy of the reduction variable
+    size_t Size;
+    Function *IdFn;
+    Function *MergeFn;
+    Type *Type;
+    SmallSet<Instruction *, 8> HyperLookups;
+    GlobalVariable *SharedPtr;
+  };
+
+  ValueMap<Value *, ReductionVarInfo> ReducedVars;
+  // Identify all reduction variables in the kernel.
+  for (BasicBlock &BB : *KernelF) {
+    for (Instruction &I : BB) {
+      if (auto *Call = dyn_cast<CallInst>(&I)) {
+        // If the function called starts with "llvm.hyper.lookup" then we have a
+        // reduction variable.
+        Function *Callee = Call->getCalledFunction();
+        if (Callee && Callee->getName().starts_with("llvm.hyper.lookup")) {
+          Value *Ptr = Call->getOperand(0);
+          size_t Size = 0;
+          if (auto *ConstSize = dyn_cast<ConstantInt>(Call->getOperand(1))) {
+            Size = ConstSize->getZExtValue();
+          } else {
+            report_fatal_error("cuabi: reduction variable has invalid size");
+          }
+          Function *IdFn = dyn_cast<Function>(Call->getOperand(2));
+          if (!IdFn) {
+            report_fatal_error(
+                "cuabi: reduction variable has invalid identity function");
+          }
+          Function *MergeFn = dyn_cast<Function>(Call->getOperand(3));
+          if (!MergeFn) {
+            report_fatal_error(
+                "cuabi: reduction variable has invalid merge function");
+          }
+          if (Size > 8) {
+            // For now only support reduction variables with size <= 8, so they
+            // can be shuffled around with warp shuffles.
+            report_fatal_error("cuabi: reduction variable w/ size greater than "
+                               "8 is not supported for now");
+          }
+          // If we have already seen this pointer
+          if (auto It = ReducedVars.find(Ptr); It != ReducedVars.end()) {
+            // Replace the call with a copy of LocalPtr
+            ReductionVarInfo &Record = It->second;
+            if (Size != Record.Size || IdFn != Record.IdFn ||
+                MergeFn != Record.MergeFn) {
+              report_fatal_error("cuabi: reduction variable has inconsistent "
+                                 "size, identity function, or merge function");
+            }
+          } else {
+            Type *ReducerType =
+                Size > 4   ? Type::getInt64Ty(KernelF->getContext())
+                : Size > 2 ? Type::getInt32Ty(KernelF->getContext())
+                : Size > 1 ? Type::getInt16Ty(KernelF->getContext())
+                           : Type::getInt8Ty(KernelF->getContext());
+            ReductionVarInfo Record = {nullptr,     Size, IdFn,   MergeFn,
+                                       ReducerType, {},   nullptr};
+            ReducedVars[Ptr] = Record;
+          }
+          ReducedVars[Ptr].HyperLookups.insert(Call);
+        }
+      }
+    }
+  }
+  const size_t WarpSize = 32;
+  const size_t MaxNumWarps = 32;
+  // Insert alloca instructions to create thread-local copies for all reduction
+  // variables.
+  {
+    IRBuilder<> B(Entry->getTerminator());
+    for (auto [Ptr, Info] : ReducedVars) {
+      // Cilk reducers are type-erased, so we need to come up with a reasonable
+      // type.
+      Info.LocalPtr = B.CreateAlloca(Info.Type);
+      // Now insert a call to the identity function pointer to initialize the
+      // local copy.
+      B.CreateCall(Info.IdFn, {Info.LocalPtr});
+      // Also create a shared memory array for the function for block-wide
+      // reduction. Use 32 because CUDA supports up to 32 warps
+      ArrayType *ArrayTy = ArrayType::get(Info.Type, MaxNumWarps);
+      std::string ArrayName =
+          KernelF->getName().str() + ".blk_red_array." + Ptr->getName().str();
+      GlobalVariable *Array = new GlobalVariable(
+          KernelModule, ArrayTy, false, GlobalValue::InternalLinkage,
+          UndefValue::get(ArrayTy), ArrayName, nullptr,
+          GlobalVariable::NotThreadLocal, 3);
+      Info.SharedPtr = Array;
+    }
+  }
+  // Replace all uses of the reduction variables with the thread-local copies.
+  for (auto [Ptr, Info] : ReducedVars) {
+    for (Instruction *HyperLookup : Info.HyperLookups) {
+      HyperLookup->replaceAllUsesWith(Info.LocalPtr);
+      HyperLookup->eraseFromParent();
+    }
+  }
+  // Now generate reduction code at exit block
+  {
+    // Remove the existing terminator for now
+    Exit->getTerminator()->eraseFromParent();
+    IRBuilder<> B(Exit);
+    Type *Int32Ty = Type::getInt32Ty(KernelF->getContext());
+    Value *LaneIdx =
+        B.CreateAnd(ThreadIdx, ConstantInt::get(Int32Ty, WarpSize - 1));
+
+    // Let's do a warp-wide reduction first
+    const auto treeReduce = [&](std::string Prefix, size_t Size) {
+      const size_t Mask = (1ULL << Size) - 1;
+      for (size_t Delta = 1; Delta < Size; Delta *= 2) {
+        std::string LoopName = Prefix + "_reduce_" + std::to_string(Delta);
+        for (auto [Ptr, Info] : ReducedVars) {
+          // Do a warp shuffle down
+          Value *DownResult = nullptr;
+          Value *LocalValue = B.CreateLoad(Info.Type, Info.LocalPtr);
+          for (size_t Offset = 0; Offset < Info.Size; Offset += 4) {
+            Value *ToShuffle = B.CreateTrunc(
+                B.CreateLShr(LocalValue,
+                             ConstantInt::get(Info.Type, Offset * 8)),
+                Int32Ty);
+            // Call the __shfl_down_sync intrinsic
+            Value *Shuffled =
+                B.CreateIntrinsic(Intrinsic::nvvm_shfl_sync_down_i32, {},
+                                  {ConstantInt::get(Int32Ty, Mask), ToShuffle,
+                                   ConstantInt::get(Int32Ty, Delta),
+                                   ConstantInt::get(Int32Ty, WarpSize)});
+            Shuffled =
+                B.CreateCast(Instruction::CastOps::ZExt, Shuffled, Info.Type);
+            if (!DownResult) {
+              DownResult = Shuffled;
+            } else {
+              DownResult = B.CreateOr(
+                  DownResult,
+                  B.CreateShl(Shuffled,
+                              ConstantInt::get(Info.Type, Offset * 8)));
+              if (auto *Or = dyn_cast<PossiblyDisjointInst>(DownResult)) {
+                Or->setIsDisjoint(true);
+              }
+            }
+          }
+          // Brent-Kung reduction
+          // Value *Cond = B.CreateICmpEQ(
+          //     B.CreateAnd(LaneIdx, ConstantInt::get(Int32Ty, 2 * Delta)),
+          //     ConstantInt::get(Int32Ty, 0));
+          // Kogge-Stone reduction
+          Value *Cond = B.CreateICmpULT(
+              B.CreateAdd(LaneIdx, ConstantInt::get(Int32Ty, Delta)),
+              ConstantInt::get(Int32Ty, Size));
+          std::string ThenName =
+              LoopName + "." + Ptr->getName().str() + ".then";
+          BasicBlock *ThenBB =
+              BasicBlock::Create(KernelF->getContext(), ThenName, KernelF);
+          std::string MergeName =
+              LoopName + "." + Ptr->getName().str() + ".merge";
+          BasicBlock *MergeBB =
+              BasicBlock::Create(KernelF->getContext(), MergeName, KernelF);
+          B.CreateCondBr(Cond, ThenBB, MergeBB);
+          B.SetInsertPoint(ThenBB);
+          {
+            AllocaInst *DownAlloca = B.CreateAlloca(Info.Type);
+            B.CreateStore(DownResult, DownAlloca);
+            // Call the merge function
+            B.CreateCall(Info.MergeFn, {Info.LocalPtr, DownAlloca});
+          }
+          B.CreateBr(MergeBB);
+          B.SetInsertPoint(MergeBB);
+        }
+      }
+    };
+    treeReduce("warp", WarpSize);
+
+    // Now, if threadIdx % 32 == 0, store the local copy to shared memory
+    Value *CondWarpLeader = B.CreateICmpEQ(
+        B.CreateAnd(ThreadIdx, ConstantInt::get(Int32Ty, WarpSize - 1)),
+        ConstantInt::get(Int32Ty, 0));
+    BasicBlock *StoreBB = BasicBlock::Create(
+        KernelF->getContext(), "blk_reduce_initial_store", KernelF);
+    BasicBlock *AfterStoreBB = BasicBlock::Create(
+        KernelF->getContext(), "blk_reduce_after_store", KernelF);
+    B.CreateCondBr(CondWarpLeader, StoreBB, AfterStoreBB);
+    B.SetInsertPoint(StoreBB);
+    {
+      // WarpIdx = threadIdx / WarpSize
+      Value *WarpIdx =
+          B.CreateUDiv(ThreadIdx, ConstantInt::get(Int32Ty, WarpSize));
+      // SharedPtr[WarpIdx] = *LocalPtr
+      for (auto [Ptr, Info] : ReducedVars) {
+        Value *StorePtr = B.CreateGEP(Info.Type, Info.SharedPtr, WarpIdx);
+        B.CreateStore(B.CreateLoad(Info.Type, Info.LocalPtr), StorePtr);
+      }
+      B.CreateBr(AfterStoreBB);
+    }
+    B.SetInsertPoint(AfterStoreBB);
+
+    // Now do a block-wide reduction from shared memory
+    assert(MaxNumWarps <= WarpSize &&
+           "Block reduction can't be done in a warp");
+    Value *CondFirstWarp =
+        B.CreateICmpULT(ThreadIdx, ConstantInt::get(Int32Ty, MaxNumWarps));
+    BasicBlock *FirstWarpBB = BasicBlock::Create(
+        KernelF->getContext(), "blk_reduce_first_warp", KernelF);
+    BasicBlock *OtherWarpBB = BasicBlock::Create(
+        KernelF->getContext(), "blk_reduce_other_warp", KernelF);
+    B.CreateCondBr(CondFirstWarp, FirstWarpBB, OtherWarpBB);
+
+    B.SetInsertPoint(FirstWarpBB);
+    {
+      Value *NumWarps =
+          B.CreateUDiv(BlockDim, ConstantInt::get(Int32Ty, WarpSize));
+      // Each thread will load SharedPtr[threadIdx] into its local copy
+      // But if the block is small, SharedPtr[threadIdx] may not have been
+      // written to and contains junk. In that case, that thread should
+      // initialize its local copy to identity.
+      Value *CondHasData = B.CreateICmpULT(ThreadIdx, NumWarps);
+      BasicBlock *LoadFromSHMemBB = BasicBlock::Create(
+          KernelF->getContext(), "blk_reduce_load_from_shmem", KernelF);
+      BasicBlock *InitIdBB = BasicBlock::Create(KernelF->getContext(),
+                                                "blk_reduce_init_id", KernelF);
+      BasicBlock *StartReduceBB = BasicBlock::Create(
+          KernelF->getContext(), "blk_reduce_start", KernelF);
+      B.CreateCondBr(CondHasData, LoadFromSHMemBB, InitIdBB);
+      B.SetInsertPoint(LoadFromSHMemBB);
+      {
+        // *LocalPtr = SharedPtr[threadIdx]
+        for (auto [Ptr, Info] : ReducedVars) {
+          Value *SHMemPtr = B.CreateGEP(Info.Type, Info.SharedPtr, ThreadIdx);
+          B.CreateStore(B.CreateLoad(Info.Type, SHMemPtr), Info.LocalPtr);
+        }
+        B.CreateBr(StartReduceBB);
+      }
+      B.SetInsertPoint(InitIdBB);
+      {
+        // Identity(*LocalPtr)
+        for (auto [Ptr, Info] : ReducedVars) {
+          B.CreateCall(Info.IdFn, {Info.LocalPtr});
+        }
+        B.CreateBr(StartReduceBB);
+      }
+      B.SetInsertPoint(StartReduceBB);
+      // Load the shared memory array
+      treeReduce("blk", MaxNumWarps);
+      B.CreateBr(OtherWarpBB);
+    }
+    B.SetInsertPoint(OtherWarpBB);
+    Value *CondBlockLeader =
+        B.CreateICmpEQ(ThreadIdx, ConstantInt::get(Int32Ty, 0));
+    BasicBlock *WriteToGlobalBB = BasicBlock::Create(
+        KernelF->getContext(), "blk_reduce_write_to_global", KernelF);
+    BasicBlock *ExitBB =
+        BasicBlock::Create(KernelF->getContext(), "blk_reduce_exit", KernelF);
+    B.CreateCondBr(CondBlockLeader, WriteToGlobalBB, ExitBB);
+    B.SetInsertPoint(WriteToGlobalBB);
+    {
+      for (auto [Ptr, Info] : ReducedVars) {
+        // Write a CAS loop to write the local copy to global memory
+        Value *OldPtr = B.CreateAlloca(Info.Type);
+        Value *NewPtr = B.CreateAlloca(Info.Type);
+        BasicBlock *LoopBB = BasicBlock::Create(
+            KernelF->getContext(),
+            "blk_reduce_write_loop_" + Ptr->getName().str(), KernelF);
+        BasicBlock *DoneBB = BasicBlock::Create(
+            KernelF->getContext(),
+            "blk_reduce_write_done_" + Ptr->getName().str(), KernelF);
+        LoadInst *LoadedOldVal = B.CreateLoad(Info.Type, Ptr);
+        // LoadedOldVal->setAtomic(AtomicOrdering::SequentiallyConsistent);
+        BasicBlock *PrevBlock = B.GetInsertBlock();
+        B.CreateBr(LoopBB);
+        B.SetInsertPoint(LoopBB);
+        {
+          PHINode *OldVal = B.CreatePHI(Info.Type, 2);
+          B.CreateStore(OldVal, OldPtr);
+          B.CreateStore(B.CreateLoad(Info.Type, Info.LocalPtr), NewPtr);
+          B.CreateCall(Info.MergeFn, {NewPtr, OldPtr});
+          Value *CASResult = B.CreateAtomicCmpXchg(
+              Ptr, OldVal, B.CreateLoad(Info.Type, NewPtr),
+              MaybeAlign(Info.Size), AtomicOrdering::SequentiallyConsistent,
+              AtomicOrdering::SequentiallyConsistent);
+          Value *CASOldVal = B.CreateExtractValue(CASResult, 0);
+          Value *CASSuccess = B.CreateExtractValue(CASResult, 1);
+          OldVal->addIncoming(CASOldVal, LoopBB);
+          OldVal->addIncoming(LoadedOldVal, PrevBlock);
+          B.CreateCondBr(CASSuccess, DoneBB, LoopBB);
+        }
+        B.SetInsertPoint(DoneBB);
+      }
+      B.CreateBr(ExitBB);
+    }
+    B.SetInsertPoint(ExitBB);
+    B.CreateRetVoid();
   }
 }
 

@@ -261,6 +261,9 @@ public:
   void remapData(ValueToValueMapTy &VMap) override final;
 
   Function *resolveLibDeviceFunction(Function *F, bool enableFastMode);
+
+  void fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
+                           Value *BlockDim);
 };
 
 }
