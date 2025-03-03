@@ -258,6 +258,8 @@ public:
                                DominatorTree &DT) override final;
   void transformForPTX(Function &F);
 
+  void remapData(ValueToValueMapTy &VMap) override final;
+
   Function *resolveLibDeviceFunction(Function *F, bool enableFastMode);
 };
 

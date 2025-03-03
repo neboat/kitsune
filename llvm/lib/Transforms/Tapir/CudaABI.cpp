@@ -973,6 +973,14 @@ void CudaLoop::transformForPTX(Function &F) {
   }
 }
 
+void CudaLoop::remapData(ValueToValueMapTy &VMap) {
+  for (auto &V : OrderedInputs) {
+    if (auto MappedV = VMap[V]) {
+      V = MappedV;
+    }
+  }
+}
+
 void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
                                        DominatorTree &DT) {
 

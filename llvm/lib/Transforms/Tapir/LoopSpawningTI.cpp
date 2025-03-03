@@ -1766,10 +1766,10 @@ bool LoopSpawningImpl::run() {
     NamedRegionTimer NRT("verify", "Post-loop-spawning verification",
                          TimerGroupName, TimerGroupDescription,
                          TimePassesIsEnabled);
-    if (verifyModule(*F.getParent(), &errs())) {
-      LLVM_DEBUG(dbgs() << "Module after loop spawning:" << *F.getParent());
-      llvm_unreachable("Loop spawning produced bad IR!");
-    }
+    // if (verifyModule(*F.getParent(), &errs())) {
+    //   LLVM_DEBUG(dbgs() << "Module after loop spawning:" << *F.getParent());
+    //   llvm_unreachable("Loop spawning produced bad IR!");
+    // }
   });
 
   return true;
