@@ -433,6 +433,13 @@ CudaLoop::CudaLoop(Module &M, Module &KernelModule, const std::string &KN,
                             Int32Ty,  // host pointer
                             Int64Ty,  // device pointer
                             Int64Ty); // number of bytes to copy
+
+  KitCudaMemAllocManagedFn =
+      M.getOrInsertFunction("__kitcuda_mem_alloc_managed",
+                            VoidPtrTy, // return the device pointer
+                            Int64Ty);  // number of bytes to allocate
+  KitCudaMemFreeFn = M.getOrInsertFunction("__kitcuda_mem_free", VoidPtrTy,
+                                           VoidPtrTy); // pointer to free
   LLVM_DEBUG(dbgs() << "\t\tdone.\n");
 }
 
@@ -826,7 +833,7 @@ void CudaLoop::postProcessOutline(TapirLoopInfo &TLI, TaskOutlineInfo &Out,
          "End argument not used in condition!");
   ClonedCond->setOperand(TripCountIdx, ThreadEnd);
 
-  fixReducersInKernel(KernelF, ThreadIdx, BlockDim);
+  fixReducersInKernel(KernelF, ThreadIdx, BlockDim, VMap);
 
   if (KeepIntermediateFiles) {
     std::error_code EC;
@@ -839,8 +846,115 @@ void CudaLoop::postProcessOutline(TapirLoopInfo &TLI, TaskOutlineInfo &Out,
   }
 }
 
+void CreatePrintf(IRBuilder<> &B, const char *Fmt, ArrayRef<Value *> Args) {
+  Module &M = *B.GetInsertBlock()->getModule();
+  // Create a printf on CUDA
+  Function *Printf;
+  if (auto *F = M.getFunction("vprintf")) {
+    Printf = F;
+  } else {
+    FunctionType *PrintfTy =
+        FunctionType::get(B.getInt32Ty(),
+                          {PointerType::getUnqual(M.getContext()),
+                           PointerType::getUnqual(M.getContext())},
+                          false);
+    Printf =
+        Function::Create(PrintfTy, GlobalValue::ExternalLinkage, "vprintf", &M);
+  }
+  size_t TotalSize = 0;
+  size_t Alignment = 1;
+  for (Value *Arg : Args) {
+    size_t ArgSize = Arg->getType()->getPrimitiveSizeInBits() / 8;
+    TotalSize += ArgSize;
+    Alignment = std::max(Alignment, ArgSize);
+  }
+  Type *ArgType = ArrayType::get(Type::getInt8Ty(M.getContext()), TotalSize);
+  AllocaInst *ArgPtr = B.CreateAlloca(ArgType);
+  ArgPtr->setAlignment(Align(Alignment));
+  size_t Offset = 0;
+  for (Value *Arg : Args) {
+    size_t ArgSize = Arg->getType()->getPrimitiveSizeInBits() / 8;
+    B.CreateStore(Arg,
+                  B.CreateConstInBoundsGEP2_32(ArgType, ArgPtr, 0, Offset));
+    Offset += ArgSize;
+  }
+  B.CreateCall(Printf, {B.CreateGlobalStringPtr(Fmt), ArgPtr});
+}
+
 void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
-                                   Value *BlockDim) {
+                                   Value *BlockDim, ValueToValueMapTy &VMap) {
+  struct ReductionVarInfo {
+    Value *LocalPtr; // Holds the thread-local copy of the reduction variable
+    size_t Size;
+    Function *IdFn;
+    Function *MergeFn;
+    Type *Type;
+    SmallSet<Instruction *, 8> HyperLookups;
+    GlobalVariable *SharedPtr;
+  };
+
+  ValueMap<Value *, ReductionVarInfo> ReducedVars;
+  // Identify all reduction variables in the kernel.
+  for (BasicBlock &BB : *KernelF) {
+    for (Instruction &I : BB) {
+      if (auto *Call = dyn_cast<CallInst>(&I)) {
+        if (isTapirIntrinsic(Intrinsic::hyper_lookup, &I)) {
+          Value *Ptr = Call->getOperand(0);
+          size_t Size = 0;
+          if (auto *ConstSize = dyn_cast<ConstantInt>(Call->getOperand(1))) {
+            Size = ConstSize->getZExtValue();
+          }
+          Function *IdFn = dyn_cast<Function>(Call->getOperand(2));
+          Function *MergeFn = dyn_cast<Function>(Call->getOperand(3));
+          assert(Size > 0 && IdFn && MergeFn &&
+                 "cuabi: reduction variable has invalid size, identity "
+                 "function, or merge function");
+          if (Size > 8) {
+            // For now only support reduction variables with size <= 8, so they
+            // can be shuffled around with warp shuffles and accumulated to
+            // global memory through a CAS loop.
+            report_fatal_error("cuabi: reduction variable w/ size greater than "
+                               "8 is not supported for now");
+          }
+          if (auto It = ReducedVars.find(Ptr); It != ReducedVars.end()) {
+            ReductionVarInfo &Record = It->second;
+            assert(Size == Record.Size && IdFn == Record.IdFn &&
+                   MergeFn == Record.MergeFn &&
+                   "cuabi: reduction variable has inconsistent "
+                   "size, identity function, or merge function");
+          } else {
+            Type *ReducerType =
+                Type::getIntNTy(KernelF->getContext(), bit_ceil(Size) * 8);
+            ReductionVarInfo Record = {nullptr,     Size, IdFn,   MergeFn,
+                                       ReducerType, {},   nullptr};
+            ReducedVars[Ptr] = Record;
+          }
+          ReducedVars[Ptr].HyperLookups.insert(Call);
+        }
+      }
+    }
+  }
+
+  if (ReducedVars.empty()) {
+    LLVM_DEBUG(dbgs() << "cuabi: no reduction variables found in kernel\n");
+    return;
+  }
+
+  for (auto [Ptr, Info] : ReducedVars) {
+    // What a hack, should have done it in preProcessTapirLoop but whatever.
+    const auto VMapReverseLookup = [&VMap](Value *Target) -> Value * {
+      for (auto [K, V] : VMap) {
+        if (V == Target)
+          return const_cast<Value *>(K);
+      }
+      return nullptr;
+    };
+    Value *HostPtr = VMapReverseLookup(Ptr);
+    Function *HostIdFn = dyn_cast<Function>(VMapReverseLookup(Info.IdFn));
+    Function *HostMergeFn = dyn_cast<Function>(VMapReverseLookup(Info.MergeFn));
+    ReducerInputs[HostPtr] = {Info.Size, HostIdFn, HostMergeFn};
+  }
+
   BasicBlock *Entry = &KernelF->getEntryBlock();
   BasicBlock *Exit = [&] {
     SmallSet<BasicBlock *, 8> Terminators;
@@ -864,72 +978,6 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
     return NewExit;
   }();
 
-  struct ReductionVarInfo {
-    Value *LocalPtr; // Holds the thread-local copy of the reduction variable
-    size_t Size;
-    Function *IdFn;
-    Function *MergeFn;
-    Type *Type;
-    SmallSet<Instruction *, 8> HyperLookups;
-    GlobalVariable *SharedPtr;
-  };
-
-  ValueMap<Value *, ReductionVarInfo> ReducedVars;
-  // Identify all reduction variables in the kernel.
-  for (BasicBlock &BB : *KernelF) {
-    for (Instruction &I : BB) {
-      if (auto *Call = dyn_cast<CallInst>(&I)) {
-        // If the function called starts with "llvm.hyper.lookup" then we have a
-        // reduction variable.
-        Function *Callee = Call->getCalledFunction();
-        if (Callee && Callee->getName().starts_with("llvm.hyper.lookup")) {
-          Value *Ptr = Call->getOperand(0);
-          size_t Size = 0;
-          if (auto *ConstSize = dyn_cast<ConstantInt>(Call->getOperand(1))) {
-            Size = ConstSize->getZExtValue();
-          } else {
-            report_fatal_error("cuabi: reduction variable has invalid size");
-          }
-          Function *IdFn = dyn_cast<Function>(Call->getOperand(2));
-          if (!IdFn) {
-            report_fatal_error(
-                "cuabi: reduction variable has invalid identity function");
-          }
-          Function *MergeFn = dyn_cast<Function>(Call->getOperand(3));
-          if (!MergeFn) {
-            report_fatal_error(
-                "cuabi: reduction variable has invalid merge function");
-          }
-          if (Size > 8) {
-            // For now only support reduction variables with size <= 8, so they
-            // can be shuffled around with warp shuffles.
-            report_fatal_error("cuabi: reduction variable w/ size greater than "
-                               "8 is not supported for now");
-          }
-          // If we have already seen this pointer
-          if (auto It = ReducedVars.find(Ptr); It != ReducedVars.end()) {
-            // Replace the call with a copy of LocalPtr
-            ReductionVarInfo &Record = It->second;
-            if (Size != Record.Size || IdFn != Record.IdFn ||
-                MergeFn != Record.MergeFn) {
-              report_fatal_error("cuabi: reduction variable has inconsistent "
-                                 "size, identity function, or merge function");
-            }
-          } else {
-            Type *ReducerType =
-                Size > 4   ? Type::getInt64Ty(KernelF->getContext())
-                : Size > 2 ? Type::getInt32Ty(KernelF->getContext())
-                : Size > 1 ? Type::getInt16Ty(KernelF->getContext())
-                           : Type::getInt8Ty(KernelF->getContext());
-            ReductionVarInfo Record = {nullptr,     Size, IdFn,   MergeFn,
-                                       ReducerType, {},   nullptr};
-            ReducedVars[Ptr] = Record;
-          }
-          ReducedVars[Ptr].HyperLookups.insert(Call);
-        }
-      }
-    }
-  }
   const size_t WarpSize = 32;
   const size_t MaxNumWarps = 32;
   // Insert alloca instructions to create thread-local copies for all reduction
@@ -970,9 +1018,8 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
     Type *Int32Ty = Type::getInt32Ty(KernelF->getContext());
     Value *LaneIdx =
         B.CreateAnd(ThreadIdx, ConstantInt::get(Int32Ty, WarpSize - 1));
-
     // Let's do a warp-wide reduction first
-    const auto treeReduce = [&](std::string Prefix, size_t Size) {
+    const auto TreeReduce = [&](std::string Prefix, size_t Size) {
       const size_t Mask = (1ULL << Size) - 1;
       for (size_t Delta = 1; Delta < Size; Delta *= 2) {
         std::string LoopName = Prefix + "_reduce_" + std::to_string(Delta);
@@ -990,7 +1037,7 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
                 B.CreateIntrinsic(Intrinsic::nvvm_shfl_sync_down_i32, {},
                                   {ConstantInt::get(Int32Ty, Mask), ToShuffle,
                                    ConstantInt::get(Int32Ty, Delta),
-                                   ConstantInt::get(Int32Ty, WarpSize)});
+                                   ConstantInt::get(Int32Ty, WarpSize - 1)});
             Shuffled =
                 B.CreateCast(Instruction::CastOps::ZExt, Shuffled, Info.Type);
             if (!DownResult) {
@@ -1034,7 +1081,7 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
         }
       }
     };
-    treeReduce("warp", WarpSize);
+    TreeReduce("warp", WarpSize);
 
     // Now, if threadIdx % 32 == 0, store the local copy to shared memory
     Value *CondWarpLeader = B.CreateICmpEQ(
@@ -1058,6 +1105,8 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
       B.CreateBr(AfterStoreBB);
     }
     B.SetInsertPoint(AfterStoreBB);
+    B.CreateIntrinsic(Intrinsic::nvvm_bar_sync, {},
+                      {ConstantInt::get(Int32Ty, 0)});
 
     // Now do a block-wide reduction from shared memory
     assert(MaxNumWarps <= WarpSize &&
@@ -1105,7 +1154,7 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
       }
       B.SetInsertPoint(StartReduceBB);
       // Load the shared memory array
-      treeReduce("blk", MaxNumWarps);
+      TreeReduce("blk", MaxNumWarps);
       B.CreateBr(OtherWarpBB);
     }
     B.SetInsertPoint(OtherWarpBB);
@@ -1301,6 +1350,15 @@ void CudaLoop::remapData(ValueToValueMapTy &VMap) {
       V = MappedV;
     }
   }
+  DenseMap<const Value *, ReducerOutlineLoopCallInfo> NewReducerInputs;
+  for (auto [V, Info] : ReducerInputs) {
+    if (auto MappedV = VMap[V]) {
+      NewReducerInputs[MappedV] = Info;
+    } else {
+      NewReducerInputs[V] = Info;
+    }
+  }
+  ReducerInputs = std::move(NewReducerInputs);
 }
 
 void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
@@ -1369,19 +1427,46 @@ void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
   EntryBuilder.CreateStore(ConstantPointerNull::get(VoidPtrTy), CudaStream);
   bool StreamAssigned = false;
   unsigned int i = 0;
+  Type *Int64Ty = Type::getInt64Ty(Ctx);
+
+  std::vector<CudaABI::ReducerLaunchInfo> ReducerLaunchInfos;
+
   for (Value *V : OrderedInputs) {
+    Value *RealV = V;
+    if (auto ReducerInput = ReducerInputs.find(V);
+        ReducerInput != ReducerInputs.end()) {
+      const auto &[Size, IdFn, MergeFn] = ReducerInput->second;
+      // For reducer inputs, don't generate prefetch code because reducer views
+      // are allocated by the OpenCilk runtime instead of kitrt.
+      // One fix would be to modify cheetah to allocate using kitrt allocators.
+      // Or, alternatively, the hacky way here is to allocate a temporary view
+      // via kitrt, copy the content to the temporary view. Prefetch that view
+      // to GPU, launch the kernel, and then copy stuff back.
+      LLVM_DEBUG(dbgs() << "\t\t- allocating reducer view for " << *V << "\n");
+      Value *DeviceView = NewBuilder.CreateCall(
+          KitCudaMemAllocManagedFn, {ConstantInt::get(Int64Ty, Size)});
+      Value *DeviceViewPtr = EntryBuilder.CreateAlloca(VoidPtrTy);
+      NewBuilder.CreateStore(DeviceView, DeviceViewPtr);
+      // Now initialize the device view
+      NewBuilder.CreateCall(IdFn, {DeviceView});
+      // Value *HostViewPtr = EntryBuilder.CreateAlloca(VoidPtrTy);
+      // NewBuilder.CreateStore(HostView, HostViewPtr);
+      ReducerLaunchInfos.push_back({V, DeviceViewPtr, Size, IdFn, MergeFn});
+      RealV = DeviceView;
+    }
+
     Value *VP = EntryBuilder.CreateAlloca(V->getType());
-    NewBuilder.CreateStore(V, VP);
+    NewBuilder.CreateStore(RealV, VP);
     Value *VoidVPtr = NewBuilder.CreateBitCast(VP, VoidPtrTy);
     Value *ArgPtr =
         NewBuilder.CreateConstInBoundsGEP2_32(ArrayTy, ArgArray, 0, i);
     NewBuilder.CreateStore(VoidVPtr, ArgPtr);
     i++;
 
-    if (CodeGenPrefetch && V->getType()->isPointerTy()) {
+    if (CodeGenPrefetch && RealV->getType()->isPointerTy()) {
       LLVM_DEBUG(dbgs() << "\t\t- code gen prefetch for kernel arg #" << i
                         << "\n");
-      Value *VoidPP = NewBuilder.CreateBitCast(V, VoidPtrTy);
+      Value *VoidPP = NewBuilder.CreateBitCast(RealV, VoidPtrTy);
       Value *SPtr = NewBuilder.CreateLoad(VoidPtrTy, CudaStream);
       Value *NewSPtr =
           NewBuilder.CreateCall(KitCudaMemPrefetchFn, {VoidPP, SPtr});
@@ -1426,7 +1511,6 @@ void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
   // Deal with type mismatches for the trip count. A difference
   // introduced via the input source details and the runtime's
   // API type signature for the launch.
-  Type *Int64Ty = Type::getInt64Ty(Ctx);
   Value *TripCount = OrderedInputs[0];
   Value *CastTripCount = nullptr;
   if (TripCount->getType() != Int64Ty) {
@@ -1480,6 +1564,7 @@ void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
                     << "\t\t\tcall: " << *LaunchStream << "\n"
                     << "\t\t\tstream: " << *CudaStream << "\n");
   TTarget->registerLaunchStream(LaunchStream, CudaStream);
+  TTarget->registerReducerLaunchInfo(LaunchStream, ReducerLaunchInfos);
 
   TOI.ReplCall->eraseFromParent();
   LLVM_DEBUG(dbgs() << "*** finished processing outlined call.\n");
@@ -1837,6 +1922,41 @@ void CudaABI::finalizeLaunchCalls(Module &M, GlobalVariable *Fatbin) {
                 LLVM_DEBUG(dbgs()
                            << "\t\t\t\t* cuda stream: " << *CudaStream << "\n");
                 CI->setArgOperand(0, CudaStream);
+                std::vector<ReducerLaunchInfo> ReducerLaunchInfos =
+                    getReducerLaunchInfo(SavedLaunchCI);
+                if (!ReducerLaunchInfos.empty()) {
+                  SyncBuilder.SetInsertPoint(CI->getNextNonDebugInstruction());
+                  FunctionCallee KitCudaMemPrefetchToHostFn =
+                      M.getOrInsertFunction(
+                          "__kitcuda_mem_host_prefetch",
+                          VoidPtrTy,  // return the device pointer
+                          VoidPtrTy,  // pointer to prefetch
+                          VoidPtrTy); // opaque stream
+                  FunctionCallee KitCudaMemFreeFn =
+                      M.getOrInsertFunction("__kitcuda_mem_free",
+                                            VoidTy,     // returns
+                                            VoidPtrTy); // pointer to free
+                  for (auto [Ptr, DeviceViewPtr, _Size, _IdFn, _MergeFn] :
+                       ReducerLaunchInfos) {
+                    Value *DeviceView = SyncBuilder.CreateLoad(
+                        VoidPtrTy, DeviceViewPtr, "device_view");
+                    SyncBuilder.CreateCall(KitCudaMemPrefetchToHostFn,
+                                           {DeviceView, CudaStream});
+                  }
+                  for (auto [Ptr, DeviceViewPtr, Size, IdFn, MergeFn] :
+                       ReducerLaunchInfos) {
+                    Value *DeviceView = SyncBuilder.CreateLoad(
+                        VoidPtrTy, DeviceViewPtr, "device_view");
+                    // Generate a lookup call to get the current view of the
+                    // reducer.
+                    Value *HostView = SyncBuilder.CreateIntrinsic(
+                        Intrinsic::hyper_lookup, {Int64Ty},
+                        {Ptr, ConstantInt::get(Int64Ty, Size), IdFn, MergeFn});
+                    SyncBuilder.CreateCall(MergeFn, {HostView, DeviceView});
+                    SyncBuilder.CreateCall(KitCudaMemFreeFn, {DeviceView});
+                  }
+                }
+
                 SavedLaunchCI = nullptr;
                 LLVM_DEBUG(dbgs() << "\t\t\t* patched call: " << *CI << "\n");
               } else {

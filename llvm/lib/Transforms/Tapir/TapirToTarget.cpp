@@ -204,6 +204,11 @@ bool TapirToTargetImpl::processSimpleABI(Function &F, BasicBlock *TFEntry) {
 
       if (!dyn_cast<CallBase>(&I))
         continue;
+
+      if (isTapirIntrinsic(Intrinsic::hyper_lookup, &I, nullptr) ||
+          isTapirIntrinsic(Intrinsic::reducer_register, &I, nullptr) ||
+          isTapirIntrinsic(Intrinsic::reducer_unregister, &I, nullptr))
+        ReducerOperations.push_back(cast<CallInst>(&I));
     }
   }
 
@@ -233,6 +238,12 @@ bool TapirToTargetImpl::processSimpleABI(Function &F, BasicBlock *TFEntry) {
   while (!Syncs.empty()) {
     SyncInst *SI = Syncs.pop_back_val();
     Target->lowerSync(*SI);
+    Changed = true;
+  }
+
+  while (!ReducerOperations.empty()) {
+    CallBase *CI = ReducerOperations.pop_back_val();
+    Target->lowerReducerOperation(CI);
     Changed = true;
   }
 

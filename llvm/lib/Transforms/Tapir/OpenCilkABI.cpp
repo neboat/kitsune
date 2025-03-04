@@ -1184,6 +1184,19 @@ void OpenCilkABI::lowerReducerOperation(CallBase *CI) {
   switch (ID) {
   default:
     llvm_unreachable("unexpected reducer intrinsic");
+  case Intrinsic::hyper_lookup:
+    Fn = Get__cilkrts_reducer_lookup();
+    break;
+  case Intrinsic::reducer_register: {
+    const Type *SizeType = CI->getArgOperand(1)->getType();
+    assert(isa<IntegerType>(SizeType));
+    Fn = Get__cilkrts_reducer_register(SizeType->getIntegerBitWidth());
+    assert(Fn);
+    break;
+  }
+  case Intrinsic::reducer_unregister:
+    Fn = Get__cilkrts_reducer_unregister();
+    break;
   }
   CI->setCalledFunction(Fn);
 }

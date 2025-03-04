@@ -136,6 +136,26 @@ public:
       return nullptr;
   }
 
+  struct ReducerLaunchInfo {
+    Value *Ptr;
+    Value *DeviceViewPtr;
+    size_t Size;
+    Function *IdFn;
+    Function *MergeFn;
+  };
+
+  void registerReducerLaunchInfo(CallInst *CI,
+                                 std::vector<ReducerLaunchInfo> &Infos) {
+    ReducerLaunchInfoMap[CI] = Infos;
+  }
+
+  std::vector<ReducerLaunchInfo> getReducerLaunchInfo(CallInst *CI) {
+    if (const auto It = ReducerLaunchInfoMap.find(CI);
+        It != ReducerLaunchInfoMap.end()) {
+      return It->second;
+    }
+    return {};
+  }
 
   private:
     CudaABIOutputFile generatePTX();
@@ -160,6 +180,8 @@ public:
 
     typedef llvm::DenseMap<CallInst*,AllocaInst*>  LaunchToStreamMapTy;
     LaunchToStreamMapTy   KernelLaunchToStreamMap;
+
+    DenseMap<CallInst *, std::vector<ReducerLaunchInfo>> ReducerLaunchInfoMap;
 
     Module   KernelModule;
     TargetMachine *PTXTargetMachine;
@@ -221,7 +243,23 @@ private:
   FunctionCallee KitCudaCreateFBModuleFn = nullptr;
   FunctionCallee KitCudaGetGlobalSymbolFn = nullptr;
   FunctionCallee KitCudaMemcpySymbolToDeviceFn = nullptr;
+
+  // Added to support OpenCilk reducers.
+  FunctionCallee KitCudaMemAllocManagedFn = nullptr;
+  FunctionCallee KitCudaMemFreeFn = nullptr;
+
   SmallVector<Value *, 5> OrderedInputs;
+
+  // Some bookkeeping for reduction variables that would allow recreation of
+  // reducer lookup call at the outlined loop call site.
+  struct ReducerOutlineLoopCallInfo {
+    size_t Size;
+    Function *IdFn;
+    Function *MergeFn;
+  };
+  // Maps a subset of OrderedInputs that are reducer variables to
+  // ReducerOutlineLoopCallInfo.
+  DenseMap<const Value *, ReducerOutlineLoopCallInfo> ReducerInputs;
 
 public:
   CudaLoop(Module &M,   // Input module (host side)
@@ -254,6 +292,10 @@ public:
                            ValueToValueMapTy &VMap) override;
   void postProcessOutline(TapirLoopInfo &TL, TaskOutlineInfo & Out,
                           ValueToValueMapTy &VMap) override final;
+
+  void fixReducersInKernel(Function *KernelF, Value *ThreadIdx, Value *BlockDim,
+                           ValueToValueMapTy &VMap);
+
   void processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo & TOI,
                                DominatorTree &DT) override final;
   void transformForPTX(Function &F);
@@ -261,9 +303,6 @@ public:
   void remapData(ValueToValueMapTy &VMap) override final;
 
   Function *resolveLibDeviceFunction(Function *F, bool enableFastMode);
-
-  void fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
-                           Value *BlockDim);
 };
 
 }
