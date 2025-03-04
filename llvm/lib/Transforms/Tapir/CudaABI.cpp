@@ -1566,7 +1566,14 @@ void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
   TTarget->registerLaunchStream(LaunchStream, CudaStream);
   TTarget->registerReducerLaunchInfo(LaunchStream, ReducerLaunchInfos);
 
+  // Experiment with generating a sync call right here (as opposed to end of
+  // sync region)
+  Type *VoidTy = Type::getVoidTy(Ctx);
+  FunctionCallee KitCudaSyncFn =
+      M.getOrInsertFunction("__kitcuda_sync_thread_stream", VoidTy, VoidPtrTy);
+  NewBuilder.CreateCall(KitCudaSyncFn, {LaunchStream});
   TOI.ReplCall->eraseFromParent();
+
   LLVM_DEBUG(dbgs() << "*** finished processing outlined call.\n");
 }
 
@@ -1698,20 +1705,20 @@ bool CudaABI::preProcessFunction(Function &F, TaskInfo &TI,
 
 void CudaABI::postProcessFunction(Function &F, bool OutliningTapirLoops) {
   if (OutliningTapirLoops) {
-    LLVMContext &Ctx = M.getContext();
-    Type *VoidTy = Type::getVoidTy(Ctx);
-    PointerType *VoidPtrTy = PointerType::getUnqual(Ctx);
-    Value *CudaStream = ConstantPointerNull::get(VoidPtrTy);
-    FunctionCallee KitCudaSyncFn = M.getOrInsertFunction(
-        "__kitcuda_sync_thread_stream", VoidTy, VoidPtrTy);
+    // LLVMContext &Ctx = M.getContext();
+    // Type *VoidTy = Type::getVoidTy(Ctx);
+    // PointerType *VoidPtrTy = PointerType::getUnqual(Ctx);
+    // Value *CudaStream = ConstantPointerNull::get(VoidPtrTy);
+    // FunctionCallee KitCudaSyncFn = M.getOrInsertFunction(
+    //     "__kitcuda_sync_thread_stream", VoidTy, VoidPtrTy);
 
-    for (Value *SR : SyncRegList) {
-      for (Use &U : SR->uses()) {
-        if (auto *SyncI = dyn_cast<SyncInst>(U.getUser()))
-          CallInst::Create(KitCudaSyncFn, {CudaStream}, "",
-                           &*SyncI->getSuccessor(0)->begin());
-      }
-    }
+    // for (Value *SR : SyncRegList) {
+    //   for (Use &U : SR->uses()) {
+    //     if (auto *SyncI = dyn_cast<SyncInst>(U.getUser()))
+    //       CallInst::Create(KitCudaSyncFn, {CudaStream}, "",
+    //                        &*SyncI->getSuccessor(0)->begin());
+    //   }
+    // }
     SyncRegList.clear();
   }
 }
