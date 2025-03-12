@@ -329,7 +329,7 @@ if (KITSUNE_OPENCILK_ENABLED)
   # repository.
   ExternalProject_Add(cheetah
     DEPENDS        clang lld llvm-config llvm-link
-    GIT_REPOSITORY https://github.com/tarunprabhu/cheetah.git
+    GIT_REPOSITORY https://github.com/OpenCilk/cheetah
     GIT_TAG        dev
     SOURCE_DIR     ${KITSUNE_CHEETAH_SOURCE_DIR}
     BINARY_DIR     ${KITSUNE_CHEETAH_BINARY_DIR}
@@ -606,6 +606,7 @@ ExternalProject_Add(kitrt
              -DLLVM_RUNTIME_OUTPUT_INTDIR=${LLVM_RUNTIME_OUTPUT_INTDIR}
              -DCUDAToolkit_INCLUDE_DIRS=${CUDAToolkit_INCLUDE_DIRS}
              -DCUDAToolkit_LIBRARY_DIR=${CUDAToolkit_LIBRARY_DIR}
+             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
   USES_TERMINAL_CONFIGURE TRUE
   USES_TERMINAL_BUILD TRUE
   USES_TERMINAL_INSTALL TRUE
