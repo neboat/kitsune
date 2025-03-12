@@ -333,6 +333,22 @@ std::string PTXVersionFromCudaVersion() {
   return PTXVersionStr;
 }
 
+// Copied from NVPTXAssignValidGlobalNames::cleanUpName
+std::string cleanUpName(StringRef Name) {
+  std::string ValidName;
+  raw_string_ostream ValidNameStream(ValidName);
+  for (char C : Name) {
+    // While PTX also allows '%' at the start of identifiers, LLVM will throw a
+    // fatal error for '%' in symbol names in MCSymbol::print. Exclude for now.
+    if (isAlnum(C) || C == '_' || C == '$') {
+      ValidNameStream << C;
+    } else {
+      ValidNameStream << "_$_";
+    }
+  }
+  return ValidNameStream.str();
+}
+
 } // namespace
 
 // Helper function to configure the details of our post-Tapir transformation
@@ -2494,6 +2510,25 @@ CudaABIOutputFile CudaABI::generatePTX() {
                                                    ".postopt.LTO.ll"));
   }
 
+  // PTXAS does not support optimized debug info. Practically, this means
+  // DICompileUnit::FullDebug and DICompileUnit::LineTablesOnly do not work. But
+  // DICompileUnit::DebugDirectivesOnly does and it's good enough (you get to
+  // see the source code from Nsight reports). So we temporarily downgrade the
+  // EmissionKind of debug compile units in KernelModule.
+  DenseMap<DICompileUnit *, DICompileUnit::DebugEmissionKind> EmissionKindMap;
+  for (DICompileUnit *CU : KernelModule.debug_compile_units()) {
+    EmissionKindMap[CU] = CU->getEmissionKind();
+    switch (CU->getEmissionKind()) {
+    case DICompileUnit::NoDebug:
+      break;
+    case DICompileUnit::DebugDirectivesOnly:
+    case DICompileUnit::LineTablesOnly:
+    case DICompileUnit::FullDebug:
+      CU->setEmissionKind(DICompileUnit::DebugDirectivesOnly);
+      break;
+    }
+  }
+
   // Setup the passes and request that the output goes to the
   // specified PTX file.
   LLVM_DEBUG(dbgs() << "\t- PTX file: '" << PTXFileName << "'.\n");
@@ -2505,6 +2540,12 @@ CudaABIOutputFile CudaABI::generatePTX() {
   PassMgr.run(KernelModule);
   LLVM_DEBUG(dbgs() << "\tkernel optimizations and code gen complete.\n\n");
   LLVM_DEBUG(dbgs() << "\t\tPTX file: " << PTXFile->getFilename() << "\n");
+
+  // Restore the original debug emission kind for debug compile units, as they
+  // may still be used by host-side code gen later.
+  for (auto &[CU, EmissionKind] : EmissionKindMap) {
+    CU->setEmissionKind(EmissionKind);
+  }
   return PTXFile;
 }
 
@@ -2598,8 +2639,10 @@ CudaABI::getLoopOutlineProcessor(const TapirLoopInfo *TL) {
     // If we have debug info in the module use a line number
     // based naming scheme for kernels.
     unsigned LineNumber = TL->getLoop()->getStartLoc()->getLine();
-    KernelName =
-        CUABI_KERNEL_NAME_PREFIX + ModuleName + "_" + Twine(LineNumber).str();
+    // ModuleName could contain dot which is invalid PTX identifier, so clean it
+    // up first.
+    KernelName = CUABI_KERNEL_NAME_PREFIX + cleanUpName(ModuleName) + "_" +
+                 Twine(LineNumber).str();
   } else {
     // SmallString<255> ModName(Twine(ModuleName).str());
     // sys::path::replace_extension(ModName, "");
