@@ -349,6 +349,28 @@ std::string cleanUpName(StringRef Name) {
   return ValidNameStream.str();
 }
 
+std::pair<DebugLoc, DebugLoc> getFirstAndLastDebugLoc(Function *F) {
+  DebugLoc FirstLoc;
+  DebugLoc LastLoc;
+  for (BasicBlock &BB : *F) {
+    for (Instruction &I : BB) {
+      if (auto Loc = I.getDebugLoc()) {
+        unsigned Line = Loc->getLine();
+        unsigned Col = Loc->getColumn();
+        if (!FirstLoc || Line < FirstLoc->getLine() ||
+            (Line == FirstLoc->getLine() && Col < FirstLoc->getColumn())) {
+          FirstLoc = Loc;
+        }
+        if (!LastLoc || Line > LastLoc->getLine() ||
+            (Line == LastLoc->getLine() && Col > LastLoc->getColumn())) {
+          LastLoc = Loc;
+        }
+      }
+    }
+  }
+  return {FirstLoc, LastLoc};
+}
+
 } // namespace
 
 // Helper function to configure the details of our post-Tapir transformation
@@ -996,8 +1018,15 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
 
   const size_t WarpSize = 32;
   const size_t MaxNumWarps = 32;
-  // Insert alloca instructions to create thread-local copies for all reduction
-  // variables.
+  // To fix "inlinable function call in a function with debug info must have a
+  // !dbg location" error, we need to attach Id and Merge calls with debug
+  // locations in this function. So get the first and last debug locations in
+  // the kernel. Id call inserted at the entry block is given the first debug
+  // location, and the merge calls inserted at the exit block are given the last
+  // debug location.
+  const auto FirstAndLastLoc = getFirstAndLastDebugLoc(KernelF);
+  //  Insert alloca instructions to create thread-local copies for all reduction
+  //  variables.
   {
     IRBuilder<> B(Entry->getTerminator());
     for (auto [Ptr, Info] : ReducedVars) {
@@ -1006,7 +1035,8 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
       Info.LocalPtr = B.CreateAlloca(Info.Type);
       // Now insert a call to the identity function pointer to initialize the
       // local copy.
-      B.CreateCall(Info.IdFn, {Info.LocalPtr});
+      CallInst *IdCall = B.CreateCall(Info.IdFn, {Info.LocalPtr});
+      IdCall->setDebugLoc(FirstAndLastLoc.first);
       // Also create a shared memory array for the function for block-wide
       // reduction. Use 32 because CUDA supports up to 32 warps
       ArrayType *ArrayTy = ArrayType::get(Info.Type, MaxNumWarps);
@@ -1090,7 +1120,9 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
             AllocaInst *DownAlloca = B.CreateAlloca(Info.Type);
             B.CreateStore(DownResult, DownAlloca);
             // Call the merge function
-            B.CreateCall(Info.MergeFn, {Info.LocalPtr, DownAlloca});
+            CallInst *MergeCall =
+                B.CreateCall(Info.MergeFn, {Info.LocalPtr, DownAlloca});
+            MergeCall->setDebugLoc(FirstAndLastLoc.second);
           }
           B.CreateBr(MergeBB);
           B.SetInsertPoint(MergeBB);
@@ -1164,7 +1196,8 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
       {
         // Identity(*LocalPtr)
         for (auto [Ptr, Info] : ReducedVars) {
-          B.CreateCall(Info.IdFn, {Info.LocalPtr});
+          CallInst *IdCall = B.CreateCall(Info.IdFn, {Info.LocalPtr});
+          IdCall->setDebugLoc(FirstAndLastLoc.second);
         }
         B.CreateBr(StartReduceBB);
       }
@@ -1202,7 +1235,8 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
           PHINode *OldVal = B.CreatePHI(Info.Type, 2);
           B.CreateStore(OldVal, OldPtr);
           B.CreateStore(B.CreateLoad(Info.Type, Info.LocalPtr), NewPtr);
-          B.CreateCall(Info.MergeFn, {NewPtr, OldPtr});
+          CallInst *MergeCall = B.CreateCall(Info.MergeFn, {NewPtr, OldPtr});
+          MergeCall->setDebugLoc(FirstAndLastLoc.second);
           Value *CASResult = B.CreateAtomicCmpXchg(
               Ptr, OldVal, B.CreateLoad(Info.Type, NewPtr),
               MaybeAlign(Info.Size), AtomicOrdering::SequentiallyConsistent,
@@ -2474,37 +2508,71 @@ CudaABIOutputFile CudaABI::generatePTX() {
     if (OptLevel > 3)
       OptLevel = 3;
     LLVM_DEBUG(dbgs() << "\t- running kernel module optimization passes...\n");
-    PipelineTuningOptions pto;
-    pto.LoopVectorization = OptLevel > 2;
-    pto.SLPVectorization = OptLevel > 2;
-    pto.LoopUnrolling = OptLevel > 2;
-    pto.LoopInterleaving = OptLevel > 2;
-    pto.LoopStripmine = OptLevel > 2;
-    OptimizationLevel optLevels[] = {
+    PipelineTuningOptions PTO;
+    PTO.LoopVectorization = OptLevel > 2;
+    PTO.SLPVectorization = OptLevel > 2;
+    PTO.LoopUnrolling = OptLevel > 2;
+    PTO.LoopInterleaving = OptLevel > 2;
+    PTO.LoopStripmine = OptLevel > 2;
+    OptimizationLevel OptLevels[] = {
         OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     };
-    OptimizationLevel optLevel = optLevels[OptLevel];
 
-    LoopAnalysisManager lam;
-    FunctionAnalysisManager fam;
-    CGSCCAnalysisManager cgam;
-    ModuleAnalysisManager mam;
+    LoopAnalysisManager LAM;
+    FunctionAnalysisManager FAM;
+    CGSCCAnalysisManager CGAM;
+    ModuleAnalysisManager MAM;
 
-    PassBuilder pb(PTXTargetMachine, pto);
-    pb.registerModuleAnalyses(mam);
-    pb.registerCGSCCAnalyses(cgam);
-    pb.registerFunctionAnalyses(fam);
-    pb.registerLoopAnalyses(lam);
-    PTXTargetMachine->registerPassBuilderCallbacks(pb);
-    pb.crossRegisterProxies(lam, fam, cgam, mam);
+    PassInstrumentationCallbacks *PIC = new PassInstrumentationCallbacks();
+    PassBuilder PB(PTXTargetMachine, PTO, std::nullopt, PIC);
 
-    ModulePassManager mpm = pb.buildPerModuleDefaultPipeline(optLevel);
-    mpm.addPass(VerifierPass());
+    // Add instrumentation to print IR after each pass
+
+    LLVM_DEBUG({
+      if (verifyModule(KernelModule, &errs())) {
+        report_fatal_error("Module is broken before optimization passes");
+      }
+      std::string DumpDir = "ir-dumps-" + KernelModule.getName().str();
+      sys::fs::create_directory(DumpDir);
+      int PassCount = 0;
+      const auto DumpIRAfterPass = [&](StringRef PassID, Any IR,
+                                       const PreservedAnalyses &PA) {
+        if (const auto *MPtr = any_cast<const Module *>(&IR)) {
+          const auto *M = *MPtr;
+          std::string FileName = DumpDir + "/" + (PassCount < 10 ? "0" : "") +
+                                 std::to_string(PassCount) + "-after-" +
+                                 PassID.str() + ".ll";
+          PassCount++;
+          std::error_code EC;
+          raw_fd_ostream OS(FileName, EC, sys::fs::OF_None);
+          if (!EC) {
+            M->print(OS, nullptr);
+          }
+          if (verifyModule(*M, &errs())) {
+            report_fatal_error(Twine{"Module is broken after pass: "} +
+                               PassID.str());
+          }
+        }
+      };
+      PIC->registerAfterPassCallback(DumpIRAfterPass);
+    });
+
+    PB.registerModuleAnalyses(MAM);
+    PB.registerCGSCCAnalyses(CGAM);
+    PB.registerFunctionAnalyses(FAM);
+    PB.registerLoopAnalyses(LAM);
+    PTXTargetMachine->registerPassBuilderCallbacks(PB);
+    PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+
+    ModulePassManager MPM =
+        PB.buildPerModuleDefaultPipeline(OptLevels[OptLevel]);
+    MPM.addPass(VerifierPass());
+    // MPM.printPipeline(dbgs(), [](StringRef Name) { return Name; });
     LLVM_DEBUG(dbgs() << "\t\t* module: " << KernelModule.getName() << "\n");
-    mpm.run(KernelModule, mam);
+    MPM.run(KernelModule, MAM);
     LLVM_DEBUG(dbgs() << "\t\tpasses complete.\n");
     LLVM_DEBUG(saveModuleToFile(&KernelModule, KernelModule.getName().str() +
                                                    ".postopt.LTO.ll"));
