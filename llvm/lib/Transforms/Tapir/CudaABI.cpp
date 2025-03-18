@@ -2627,6 +2627,16 @@ void CudaABI::postProcessModule() {
                     << "cuabi: postprocessing the kernel '"
                     << KernelModule.getName() << "' and input '" << M.getName()
                     << "' modules.\n");
+  { // Remove all personality functions
+    for (Function &F : KernelModule) {
+      if (F.isDeclaration())
+        continue;
+      if (F.hasPersonalityFn() && F.getNumOperands()) {
+        F.setPersonalityFn(nullptr);
+      }
+    }
+  }
+
   LLVM_DEBUG(saveModuleToFile(&KernelModule, KernelModule.getName().str() +
                                                  ".post.unoptimized"));
   LLVM_DEBUG(saveModuleToFile(&M, M.getName().str() + ".outline-debug"));
