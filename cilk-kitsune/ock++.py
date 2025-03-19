@@ -79,19 +79,15 @@ class Invocation:
     debug: bool = False
     opt_level: int = 1
 
+    cc: str = "clang++"
+
     @staticmethod
     def parse_from_args() -> "Invocation":
-        args = sys.argv[1:]
-        try:
-            first_arg = args[0]
-            maybe_cilk_path = Path(first_arg).resolve()
-            real_cilk_path = (Path(Invocation.cilk_path) / "bin" / "clang++").resolve()
-            if maybe_cilk_path == real_cilk_path:
-                args.pop(0)
-        except:
-            pass
-
         ret = Invocation()
+
+        args = sys.argv[1:]
+        if len(args) and (args[0].endswith("clang") or args[0].endswith("clang++")):
+            ret.cc = Path(args.pop(0)).name
 
         while args:
             arg = args.pop(0)
@@ -104,6 +100,7 @@ class Invocation:
                     "-fdiagnostics-",
                     "-ffile-prefix-map",
                     "-Rpass-analysis",
+                    "-fvisibility",
                 ]
             ) or arg in [
                 "-E",
@@ -272,7 +269,7 @@ class Invocation:
 
         _run_command(
             [
-                f"{self.cilk_path}/bin/clang++",
+                f"{self.cilk_path}/bin/{self.cc}",
                 self.input_file,
                 # Disable some aggressive optimizations --- they should be done after
                 # code is flipped to device side
@@ -348,6 +345,10 @@ class Invocation:
             # cwd=self.temp_dir,
         )
 
+    @property
+    def kitmalloc_path(self) -> Path:
+        return Path(__file__).parent / "kitcuda_malloc.cpp"
+
     def compile_executable(self) -> None:
         """Compile the assembly to an executable."""
 
@@ -360,9 +361,6 @@ class Invocation:
         # The three-step process, especially step 2, is necessary to avoid
         # accidentally overriding mallocs in the runtimes (which would cause
         # infinite recursion).
-
-        kitcuda_malloc_path = (Path(__file__).parent / "kitcuda_malloc.cpp").resolve()
-        logging.debug(f"Using kitcuda_malloc.cpp at {kitcuda_malloc_path}")
 
         temp_output_file = self.temp_dir / "temp.o"
 
@@ -378,56 +376,8 @@ class Invocation:
         def is_archive_or_so(path: Path) -> bool:
             return path.suffix == ".a" or re.match(r".*\.so(\.\d+)*$", path.name)
 
-        _run_command(
-            [
-                f"{self.kitsune_path}/bin/kit++",
-                "-g",  # Pass on debug info
-                *[obj for obj in object_files if not is_archive_or_so(obj)],
-                kitcuda_malloc_path,
-                "-Wl,--wrap,malloc",
-                "-Wl,--wrap,free",
-                "-Wl,--wrap,calloc",
-                "-Wl,--wrap,realloc",
-                "-r",
-                "-nostartfiles",
-                "-nostdlib",
-                "-nodefaultlibs",
-                "-o",
-                temp_output_file,
-            ],
-            f"Kitsune compiler compiled to {temp_output_file}",
-            print_cmd=True,
-        )
-
-        hiding_syms = [
-            "__wrap_malloc",
-            "__wrap_free",
-            "__wrap_calloc",
-            "__wrap_realloc",
-            "_ZdaPv",
-            "_ZdaPvm",
-            "_ZdaPvmSt11align_val_t",
-            "_ZdaPvSt11align_val_t",
-            "_ZdlPv",
-            "_ZdlPvm",
-            "_ZdlPvmSt11align_val_t",
-            "_ZdlPvSt11align_val_t",
-            "_Znam",
-            "_ZnamSt11align_val_t",
-            "_Znwm",
-            "_ZnwmSt11align_val_t",
-        ]
-        _run_command(
-            [
-                f"{self.kitsune_path}/bin/llvm-objcopy",
-                *sum(
-                    (["--localize-symbol", sym] for sym in hiding_syms),
-                    [],
-                ),
-                temp_output_file,
-            ],
-            f"Kitsune compiler objcopyed {temp_output_file}",
-            print_cmd=True,
+        self.override_and_localize_symbols(
+            [obj for obj in object_files if not is_archive_or_so(obj)], temp_output_file
         )
 
         _run_command(
@@ -459,6 +409,15 @@ class Invocation:
 
     def compile_object(self) -> None:
         """Compile the assembly to an object file."""
+        output_file = None
+        idx = 0
+        while idx < len(self.linker_args):
+            arg = self.linker_args[idx]
+            if arg == "-o" and idx + 1 < len(self.linker_args):
+                output_file = Path(self.linker_args[idx + 1])
+                break
+            idx += 1
+        assert output_file is not None
 
         _run_command(
             [
@@ -470,6 +429,65 @@ class Invocation:
             cwd=self.temp_dir,
             print_cmd=True,
         )
+        temp_output_file = self.temp_dir / "localized.o"
+        self.override_and_localize_symbols([output_file], temp_output_file)
+        shutil.copy(temp_output_file, output_file)
+
+    def override_and_localize_symbols(
+        self, obj_files: list[Path], output_obj_file: Path
+    ) -> None:
+        _run_command(
+            [
+                f"{self.kitsune_path}/bin/kit++",
+                "-g",  # Pass on debug info
+                *obj_files,
+                self.kitmalloc_path,
+                "-Wl,--wrap,malloc",
+                "-Wl,--wrap,free",
+                "-Wl,--wrap,calloc",
+                "-Wl,--wrap,realloc",
+                "-r",
+                "-nostartfiles",
+                "-nostdlib",
+                "-nodefaultlibs",
+                "-o",
+                output_obj_file,
+            ],
+            f"Kitsune compiler compiled to {output_obj_file}",
+            print_cmd=True,
+        )
+
+        hiding_syms = [
+            "__wrap_malloc",
+            "__wrap_free",
+            "__wrap_calloc",
+            "__wrap_realloc",
+            "_ZdaPv",
+            "_ZdaPvm",
+            "_ZdaPvmSt11align_val_t",
+            "_ZdaPvSt11align_val_t",
+            "_ZdlPv",
+            "_ZdlPvm",
+            "_ZdlPvmSt11align_val_t",
+            "_ZdlPvSt11align_val_t",
+            "_Znam",
+            "_ZnamSt11align_val_t",
+            "_Znwm",
+            "_ZnwmSt11align_val_t",
+        ]
+        _run_command(
+            [
+                f"{self.kitsune_path}/bin/llvm-objcopy",
+                *sum(
+                    (["--localize-symbol", sym] for sym in hiding_syms),
+                    [],
+                ),
+                output_obj_file,
+            ],
+            f"Kitsune compiler objcopyed {output_obj_file}",
+            print_cmd=True,
+        )
+        print(output_obj_file)
 
     def run(self) -> None:
         self.setup_logging()
