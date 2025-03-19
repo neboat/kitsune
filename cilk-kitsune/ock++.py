@@ -1,0 +1,544 @@
+#!/usr/bin/env python3
+
+# A Frankenstein compiler: merge OpenCilk frontend with Kitsune backend
+
+import atexit
+import logging
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+HELP = """
+OpenCilk-Kitsune compiler wrapper.
+
+Usage:
+    ock++ [options] <input file>
+
+Options:
+    Those you would normally pass to clang++.
+"""
+
+
+# Define color codes for different log levels
+class ColoredFormatter(logging.Formatter):
+    """Custom formatter adding colors, timestamps and fixed width to log messages."""
+
+    # ANSI color codes
+    COLORS = {
+        "DEBUG": "\033[36m",  # Cyan
+        "INFO": "\033[32m",  # Green
+        "WARNING": "\033[33m",  # Yellow
+        "ERROR": "\033[31m",  # Red
+        "CRITICAL": "\033[35m",  # Magenta
+        "RESET": "\033[0m",  # Reset to default
+    }
+
+    def format(self, record):
+        # Save the original format
+        orig_format = self._style._fmt
+        levelname = record.levelname
+        levelname_fixed = f"{levelname:<8}"
+        if levelname in self.COLORS:
+            colored_levelname = (
+                f"{self.COLORS[levelname]}{levelname_fixed}{self.COLORS['RESET']}"
+            )
+            self._style._fmt = orig_format.replace("%(levelname)s", colored_levelname)
+        result = super().format(record)
+        self._style._fmt = orig_format
+        return result
+
+
+# Setup initial logging configuration with default level
+handler = logging.StreamHandler(sys.stdout)
+formatter = ColoredFormatter(
+    fmt="[%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+)
+handler.setFormatter(formatter)
+
+logger = logging.getLogger()
+logger.setLevel(logging.WARNING)
+logger.addHandler(handler)
+
+
+class Invocation:
+    cilk_path = "/home/chengyuan/Projects/opencilk/build"
+    kitsune_path = "/home/chengyuan/Projects/kitsune/build"
+
+    clang_args: list[str] = []
+    opt_args: list[str] = []
+    llc_args: list[str] = []
+    linker_args: list[str] = []
+
+    input_file: Path | None = None
+    object_files: list[Path] = []
+    temp_dir: Path | None = None
+    verbosity: int = 0
+    debug: bool = False
+    opt_level: int = 1
+
+    @staticmethod
+    def parse_from_args() -> "Invocation":
+        args = sys.argv[1:]
+        try:
+            first_arg = args[0]
+            maybe_cilk_path = Path(first_arg).resolve()
+            real_cilk_path = (Path(Invocation.cilk_path) / "bin" / "clang++").resolve()
+            if maybe_cilk_path == real_cilk_path:
+                args.pop(0)
+        except:
+            pass
+
+        ret = Invocation()
+
+        while args:
+            arg = args.pop(0)
+            # Frontend options that are standalone
+            if any(
+                arg.startswith(p)
+                for p in [
+                    "-std=",
+                    "-fopencilk",
+                    "-fdiagnostics-",
+                    "-ffile-prefix-map",
+                    "-Rpass-analysis",
+                ]
+            ) or arg in [
+                "-E",
+                "-C",
+                "-dM",
+                "-dD",
+                "-fno-exceptions",
+                "-fno-rtti",
+                "-MD",
+                "-fPIE",
+                "-fPIC",
+            ]:
+                ret.clang_args.append(arg)
+            elif arg.startswith("-Wl") or arg in ["-shared", "-static"]:
+                ret.linker_args.append(arg)
+            elif arg == "-Xlinker":
+                ret.linker_args.append(arg)
+                ret.linker_args.append(args.pop(0))
+            elif arg == "-g":
+                ret.clang_args.append(arg)
+                ret.linker_args.append(arg)
+            elif any(arg.startswith(p) for p in ["-I", "-D", "-U", "-W", "-x"]):
+                ret.clang_args.append(arg)
+                if len(arg) == 2:
+                    ret.clang_args.append(args.pop(0))
+            elif any(arg.startswith(p) for p in ["-MF", "-MT"]):
+                ret.clang_args.append(arg)
+                if len(arg) == 3:
+                    ret.clang_args.append(args.pop(0))
+            elif any(
+                arg.startswith(p) for p in ["-include", "-isystem", "-cxx-isystem"]
+            ):
+                ret.clang_args.append(arg)
+                ret.clang_args.append(args.pop(0))
+            elif any(arg.startswith(p) for p in ["-march", "-mcpu"]):
+                ret.llc_args.append(arg)
+                if "=" not in arg:
+                    ret.llc_args.append(args.pop(0))
+            elif arg == "-fomit-frame-pointer":
+                ret.llc_args.append("--frame-pointer=none")
+            elif arg == "-fno-omit-frame-pointer":
+                ret.llc_args.append("--frame-pointer=all")
+            elif any(arg.startswith(p) for p in ["-L", "-l"]):
+                ret.linker_args.append(arg)
+                if len(arg) == 2:
+                    ret.linker_args.append(args.pop(0))
+            elif arg == "-c":
+                ret.linker_args.append(arg)
+            elif arg.startswith("-o"):
+                output_path = Path(args.pop(0) if len(arg) == 2 else arg[2:]).resolve()
+                ret.linker_args += ["-o", output_path]
+            elif arg.startswith("-save-temps"):
+                temp_dir = args.pop(0) if "=" not in arg else arg.split("=")[1]
+                ret.temp_dir = Path(temp_dir).resolve()
+            elif arg.startswith("-v") and set(arg[1:]) == {"v"}:
+                ret.verbosity = len(arg) - 1
+            elif arg.startswith("-O"):
+                ret.opt_level = int(args.pop(0) if len(arg) == 2 else arg[2:])
+                if ret.opt_level == 0:
+                    logging.warning("Warning: -O0 is not supported")
+                elif ret.opt_level < 0 or ret.opt_level > 3:
+                    raise ValueError(f"Invalid optimization level: {ret.opt_level}")
+            elif arg == "--debug":
+                ret.debug = True
+            elif not arg.startswith("-"):
+                if (
+                    arg.endswith(".o")
+                    or arg.endswith(".a")
+                    or re.match(r".*\.so(\.\d+)*$", arg)
+                ):
+                    ret.object_files.append(Path(arg))
+                else:
+                    assert ret.input_file is None, "Input file already specified"
+                    ret.input_file = Path(arg)
+            elif arg == "--help":
+                print(HELP)
+                sys.exit(0)
+            elif arg == "--version":
+                # Just run clang++ --version
+                _run_command(
+                    [f"{ret.cilk_path}/bin/clang++", "--version"],
+                    "OpenCilk compiler version",
+                )
+                sys.exit(0)
+            else:
+                raise ValueError(f"Unknown option: {arg}")
+
+        if ret.input_file is None and not ret.object_files:
+            print(HELP)
+            raise ValueError("Input file not specified")
+
+        if "-fPIC" not in ret.clang_args and "-fPIE" not in ret.clang_args:
+            ret.clang_args.append("-fPIC")
+
+        return ret
+
+    def setup_logging(self) -> None:
+        """Set up logging based on command line arguments."""
+        # Determine log level
+        if self.debug:
+            log_level = logging.DEBUG
+        elif self.verbosity >= 2:
+            log_level = logging.INFO
+        elif self.verbosity == 1:
+            log_level = logging.WARNING
+        else:
+            log_level = logging.ERROR
+
+        # Apply the new log level
+        logger = logging.getLogger()
+        logger.setLevel(log_level)
+
+        # Log the selected level
+        logging.debug(f"Logging level set to {logging.getLevelName(log_level)}")
+
+    def setup_temp_dir(self) -> None:
+        """Create and return the intermediate directory path."""
+        prefix = f"{self.input_file.stem}_" if self.input_file else "ock_"
+        if self.temp_dir is None:
+            self.temp_dir = Path(tempfile.mkdtemp(prefix=prefix))
+
+            def cleanup_temp_dir():
+                if not self.temp_dir.exists():
+                    return
+                try:
+                    shutil.rmtree(self.temp_dir)
+                    logging.info(f"Cleaned up temporary directory at {self.temp_dir}")
+                except Exception as e:
+                    logging.warning(f"Failed to clean up temporary directory: {e}")
+
+            # atexit.register(cleanup_temp_dir)
+            logging.debug(f"Created intermediate directory at {self.temp_dir}")
+
+        # Create the directory if it doesn't exist
+        self.temp_dir.mkdir(exist_ok=True, parents=True)
+        # Clean up the directory
+        to_remove = sum(
+            [
+                list(self.temp_dir.glob(glob))
+                for glob in ["*.ll", "*.s", "*.kitsune", "*.ptx"]
+            ],
+            [],
+        )
+        for file in to_remove:
+            if file.is_dir():
+                shutil.rmtree(file)
+            else:
+                file.unlink()
+        logging.info(f"Cleaned up intermediate directory at {self.temp_dir}")
+
+    def check_input_file(self) -> None:
+        if not self.input_file.is_file():
+            logging.error(f"Input file '{self.input_file}' not found")
+            sys.exit(1)
+        # Resolve the input file path because the compilers will be invoked with
+        # a different working directory.
+        self.input_file = self.input_file.resolve()
+
+    @property
+    def llvm_ir_output_file(self) -> Path:
+        assert self.input_file is not None, "Input file not specified"
+        return self.temp_dir / f"{self.input_file.stem}.ll"
+
+    def generate_llvm_ir(self) -> None:
+        """Generate LLVM IR using OpenCilk's clang++."""
+
+        _run_command(
+            [
+                f"{self.cilk_path}/bin/clang++",
+                self.input_file,
+                # Disable some aggressive optimizations --- they should be done after
+                # code is flipped to device side
+                "-fno-unroll-loops",
+                "-fno-vectorize",
+                "-fno-slp-vectorize",
+                # Tell OpenCilk frontend to emit reducer intrinsics
+                "-fopencilk-kitsune",
+                f"-O{self.opt_level}",
+                "-S",
+                "-emit-llvm",
+                "-o",
+                self.llvm_ir_output_file,
+                *self.clang_args,
+            ],
+            f"OpenCilk compiler dumped IR to {self.llvm_ir_output_file}",
+            # cwd=self.temp_dir,
+        )
+
+    @property
+    def lowered_llvm_ir_output_file(self) -> Path:
+        assert self.input_file is not None, "Input file not specified"
+        return self.temp_dir / f"{self.input_file.stem}.kitsune.ll"
+
+    def run_kitsune_lowering(self) -> None:
+        """Run Kitsune's opt for IR lowering."""
+
+        # TODO: re-introduce vectorization after tapir lowering
+
+        _run_command(
+            [
+                f"{self.cilk_path}/bin/opt",
+                f"-passes=tapir-lowering<O{self.opt_level}>",
+                # These flags are for debugging
+                # "--debug-only=cuabi",
+                # "--debug-abi-calls",
+                # "--verify-each",
+                # "--cuabi-keep-files",
+                # "--pass-remarks-analysis=loop-spawning",
+                # These flags are for lowering to OpenCilk
+                "--tapir-target=opencilk",
+                "--use-opencilk-runtime-bc",
+                f"--opencilk-runtime-bc-path={self.kitsune_path}/lib/clang/19/lib/x86_64-unknown-linux-gnu/libopencilk-abi.bc",
+                "-S",
+                self.llvm_ir_output_file,
+                "-o",
+                self.lowered_llvm_ir_output_file,
+                *self.opt_args,
+            ],
+            f"Kitsune compiler lowered IR to {self.lowered_llvm_ir_output_file}",
+            cwd=self.temp_dir,
+        )
+
+    @property
+    def assembly_output_file(self) -> Path:
+        assert self.input_file is not None, "Input file not specified"
+        return self.temp_dir / f"{self.input_file.stem}.kitsune.s"
+
+    def generate_assembly(self) -> None:
+        """Generate assembly from the lowered IR."""
+
+        _run_command(
+            [
+                f"{self.kitsune_path}/bin/llc",
+                "-filetype=asm",
+                "-relocation-model=pic",
+                self.lowered_llvm_ir_output_file,
+                "-o",
+                self.assembly_output_file,
+                *self.llc_args,
+            ],
+            f"Kitsune compiler dumped assembly to {self.assembly_output_file}",
+            # cwd=self.temp_dir,
+        )
+
+    def compile_executable(self) -> None:
+        """Compile the assembly to an executable."""
+
+        # The compilation follows a 3-step process.
+        # 1. Compile all the .o files (or source files) into a single .o file,
+        # where malloc, free and C++ new/delete are wrapped to use kitcuda mallocs.
+        # 2. The .o file is then edited to localize the overridden symbols.
+        # 3. Link the .o file with the CUDA runtime, the OpenCilk runtime, and
+        # the Kitsune runtime.
+        # The three-step process, especially step 2, is necessary to avoid
+        # accidentally overriding mallocs in the runtimes (which would cause
+        # infinite recursion).
+
+        kitcuda_malloc_path = (Path(__file__).parent / "kitcuda_malloc.cpp").resolve()
+        logging.debug(f"Using kitcuda_malloc.cpp at {kitcuda_malloc_path}")
+
+        temp_output_file = self.temp_dir / "temp.o"
+
+        object_files = (
+            [self.lowered_llvm_ir_output_file]
+            if self.input_file is not None
+            else self.object_files
+        )
+
+        kitrt_dir = f"{self.kitsune_path}/tools/kitsune/kitrt/lib/clang/19/lib"
+        opencilk_dir = f"{self.kitsune_path}/lib/clang/19/lib/x86_64-unknown-linux-gnu"
+
+        def is_archive_or_so(path: Path) -> bool:
+            return path.suffix == ".a" or re.match(r".*\.so(\.\d+)*$", path.name)
+
+        _run_command(
+            [
+                f"{self.kitsune_path}/bin/kit++",
+                "-g",  # Pass on debug info
+                *[obj for obj in object_files if not is_archive_or_so(obj)],
+                kitcuda_malloc_path,
+                "-Wl,--wrap,malloc",
+                "-Wl,--wrap,free",
+                "-Wl,--wrap,calloc",
+                "-Wl,--wrap,realloc",
+                "-r",
+                "-nostartfiles",
+                "-nostdlib",
+                "-nodefaultlibs",
+                "-o",
+                temp_output_file,
+            ],
+            f"Kitsune compiler compiled to {temp_output_file}",
+            print_cmd=True,
+        )
+
+        hiding_syms = [
+            "__wrap_malloc",
+            "__wrap_free",
+            "__wrap_calloc",
+            "__wrap_realloc",
+            "_ZdaPv",
+            "_ZdaPvm",
+            "_ZdaPvmSt11align_val_t",
+            "_ZdaPvSt11align_val_t",
+            "_ZdlPv",
+            "_ZdlPvm",
+            "_ZdlPvmSt11align_val_t",
+            "_ZdlPvSt11align_val_t",
+            "_Znam",
+            "_ZnamSt11align_val_t",
+            "_Znwm",
+            "_ZnwmSt11align_val_t",
+        ]
+        _run_command(
+            [
+                f"{self.kitsune_path}/bin/llvm-objcopy",
+                *sum(
+                    (["--localize-symbol", sym] for sym in hiding_syms),
+                    [],
+                ),
+                temp_output_file,
+            ],
+            f"Kitsune compiler objcopyed {temp_output_file}",
+            print_cmd=True,
+        )
+
+        _run_command(
+            [
+                f"{self.kitsune_path}/bin/kit++",
+                "-fuse-ld=lld",  # Error message is better with lld
+                temp_output_file,
+                *[obj for obj in object_files if is_archive_or_so(obj)],
+                *self.linker_args,
+                # Link in CUDA runtime
+                "-L/opt/cuda/lib64",
+                "-Wl,-rpath,/opt/cuda/lib64",
+                "-lcudart",
+                # Link in Kitsune runtime
+                f"-L{kitrt_dir}",
+                f"-Wl,-rpath,{kitrt_dir}",
+                "-lkitrt",
+                # Link in OpenCilk runtime
+                # f"{opencilk_dir}/libopencilk.a",
+                # f"{opencilk_dir}/libopencilk-personality-cpp.a",
+                f"-L{opencilk_dir}",
+                f"-Wl,-rpath,{opencilk_dir}",
+                "-lopencilk",
+                "-lopencilk-personality-cpp",
+            ],
+            f"Kitsune compiler compiled to binary",
+            print_cmd=True,
+        )
+
+    def compile_object(self) -> None:
+        """Compile the assembly to an object file."""
+
+        _run_command(
+            [
+                f"{self.kitsune_path}/bin/kitcc",
+                self.lowered_llvm_ir_output_file,
+                *self.linker_args,
+            ],
+            f"Kitsune compiler compiled to {self.assembly_output_file}",
+            cwd=self.temp_dir,
+            print_cmd=True,
+        )
+
+    def run(self) -> None:
+        self.setup_logging()
+        logging.info(f"clang args: {self.clang_args}")
+        logging.info(f"opt args: {self.opt_args}")
+        logging.info(f"llc args: {self.llc_args}")
+        logging.info(f"linker args: {self.linker_args}")
+        self.setup_temp_dir()
+        if self.input_file is not None:
+            assert (
+                not self.object_files
+            ), "Input file and object files cannot both be specified"
+            self.check_input_file()
+            self.generate_llvm_ir()
+            self.run_kitsune_lowering()
+            # self.generate_assembly()
+            if "-c" in self.linker_args:
+                self.compile_object()
+            else:
+                self.compile_executable()
+        else:
+            assert self.object_files, "No input files specified"
+            self.compile_executable()
+
+
+def _run_command(
+    command: list[str | Path],
+    description: str,
+    cwd: Path | None = None,
+    print_cmd: bool = False,
+) -> subprocess.CompletedProcess:
+    """Run a shell command and handle errors."""
+    command_str = " ".join(str(c) for c in command)
+    if print_cmd:
+        pass
+        # print(command_str)
+        # print()
+    logging.debug(f"Running command for: {command_str}")
+    if cwd:
+        logging.debug(f"Working directory: {cwd}")
+
+    try:
+        result = subprocess.run(
+            command,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            cwd=cwd,
+        )
+        skip_line = 0
+        for line in result.stdout.decode("utf-8").split("\n"):
+            skip_line = max(0, skip_line - 1)
+            line = line.rstrip()
+            if "warning: inconsistent use of MD5 checksums" in line:
+                # This is a spurious warning from clang which we can safely ignore.
+                skip_line = 3  # Skip next three lines
+            if skip_line > 0:
+                continue
+            if line:
+                print(line)
+        logging.info(description)
+        return result
+    except subprocess.CalledProcessError as e:
+        logging.error(f"{description} failed")
+        logging.error(f"Command: {command_str}")
+        logging.error(f"Return code: {e.returncode}")
+        logging.error(f"Output: {e.stdout.decode('utf-8')}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    Invocation.parse_from_args().run()
