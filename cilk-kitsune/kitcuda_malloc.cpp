@@ -63,4 +63,6 @@ void operator delete[](void *ptr, size_t, std::align_val_t) noexcept {
 }
 #endif
 
+#undef HIDDEN
+
 // NOLINTEND(*-reserved-identifier, *-use-trailing-return-type)

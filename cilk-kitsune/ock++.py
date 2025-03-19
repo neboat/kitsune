@@ -231,7 +231,7 @@ class Invocation:
                 except Exception as e:
                     logging.warning(f"Failed to clean up temporary directory: {e}")
 
-            # atexit.register(cleanup_temp_dir)
+            atexit.register(cleanup_temp_dir)
             logging.debug(f"Created intermediate directory at {self.temp_dir}")
 
         # Create the directory if it doesn't exist
@@ -364,7 +364,7 @@ class Invocation:
 
         temp_output_file = self.temp_dir / "temp.o"
 
-        object_files = (
+        input_files = (
             [self.lowered_llvm_ir_output_file]
             if self.input_file is not None
             else self.object_files
@@ -376,16 +376,15 @@ class Invocation:
         def is_archive_or_so(path: Path) -> bool:
             return path.suffix == ".a" or re.match(r".*\.so(\.\d+)*$", path.name)
 
-        self.override_and_localize_symbols(
-            [obj for obj in object_files if not is_archive_or_so(obj)], temp_output_file
-        )
+        object_files = [obj for obj in input_files if not is_archive_or_so(obj)]
+        lib_files = [obj for obj in input_files if is_archive_or_so(obj)]
+        self.override_and_localize_symbols(object_files, temp_output_file)
 
         _run_command(
             [
                 f"{self.kitsune_path}/bin/kit++",
-                "-fuse-ld=lld",  # Error message is better with lld
                 temp_output_file,
-                *[obj for obj in object_files if is_archive_or_so(obj)],
+                *lib_files,
                 *self.linker_args,
                 # Link in CUDA runtime
                 "-L/opt/cuda/lib64",
@@ -396,8 +395,6 @@ class Invocation:
                 f"-Wl,-rpath,{kitrt_dir}",
                 "-lkitrt",
                 # Link in OpenCilk runtime
-                # f"{opencilk_dir}/libopencilk.a",
-                # f"{opencilk_dir}/libopencilk-personality-cpp.a",
                 f"-L{opencilk_dir}",
                 f"-Wl,-rpath,{opencilk_dir}",
                 "-lopencilk",
@@ -487,7 +484,6 @@ class Invocation:
             f"Kitsune compiler objcopyed {output_obj_file}",
             print_cmd=True,
         )
-        print(output_obj_file)
 
     def run(self) -> None:
         self.setup_logging()
