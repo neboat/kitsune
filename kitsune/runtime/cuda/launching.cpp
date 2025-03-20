@@ -51,16 +51,17 @@
 
 #include "kitcuda.h"
 #include "kitcuda_dylib.h"
+
+#include <array>
 #include <mutex>
 #include <string>
-#include <unordered_map>
 
 // *** EXPERIMENTAL: The runtime maintains a map from fatbinary images
 // to a supporting CUDA module.  The primary reason for this is
 // exploring reducing runtime overheads.
 //
 // TODO: Finish exploration of map vs. CUDA call overheads.
-typedef std::unordered_map<const void *, CUmodule> KitCudaModuleMap;
+typedef kitrt::unordered_map<const void *, CUmodule> KitCudaModuleMap;
 static KitCudaModuleMap _kitcuda_module_map;
 static std::mutex _kitcuda_module_map_mutex;
 
@@ -71,7 +72,7 @@ static std::mutex _kitcuda_module_map_mutex;
 // it is not clear how map overheads compare to the runtime lookup...
 //
 // TODO: Finish exploration of map vs. CUDA call overheads.
-typedef std::unordered_map<const char *, CUfunction> KitCudaKernelMap;
+typedef kitrt::unordered_map<const char *, CUfunction> KitCudaKernelMap;
 static KitCudaKernelMap _kitcuda_kernel_map;
 
 extern "C" {
@@ -148,7 +149,7 @@ void __kitcuda_set_default_threads_per_blk(int threads_per_blk) {
   _kitcuda_default_threads_per_blk = threads_per_blk;
 }
 
-typedef std::unordered_map<std::string, int> KitCudaLaunchParamMap;
+typedef kitrt::unordered_map<kitrt::string, int> KitCudaLaunchParamMap;
 static KitCudaLaunchParamMap _kitcuda_launch_param_map;
 
 namespace {
@@ -288,8 +289,11 @@ void __kitcuda_get_launch_params(size_t trip_count, CUfunction cu_func,
   // the launch parameters for this kernel and trip count.
   const char *cu_func_name;
   CU_SAFE_CALL(cuFuncGetName_p(&cu_func_name, cu_func));
-  std::string map_entry_name(cu_func_name);
-  map_entry_name += std::to_string(trip_count);
+
+  std::array<char, 256> map_entry_buf;
+  std::snprintf(map_entry_buf.data(), map_entry_buf.size(), "%s_%zu",
+                cu_func_name, trip_count);
+  kitrt::string map_entry_name(map_entry_buf.data());
 
   KitCudaLaunchParamMap::iterator lpit =
       _kitcuda_launch_param_map.find(map_entry_name);

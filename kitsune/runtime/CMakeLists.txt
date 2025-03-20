@@ -31,7 +31,6 @@ option(KITCUDA_ENABLE_NVTX "Enable NVTX profiling within the runtime" OFF)
 set(KITRT_HDRS
   kitrt.h
   debug.h
-  memory.h
   memory_map.h)
 
 set(KITRT_SRCS
@@ -58,25 +57,15 @@ set_target_properties(${KITRT} PROPERTIES
 
 target_include_directories(${KITRT}
   BEFORE PRIVATE
-  ${LLVM_MAIN_INCLUDE_DIR}
-  ${LLVM_INCLUDE_DIR}
   ${KITSUNE_SOURCE_DIR}/include
   ${KITSUNE_RUNTIME_INCLUDE_DIR})
 
-find_library(LIB_LLVM
-  NAMES LLVM
-  LLVM-${LLVM_VERSION_MAJOR}
-  LLVM-${LLVM_VERSION_MAJOR}.${LLVM_VERSION_MINOR}
-  REQUIRED
-  PATHS ${LLVM_LIBRARY_OUTPUT_INTDIR}
-  NO_DEFAULT_PATH)
 
 # FIXME: We probably don't need to explicitly link pthread and rt. These are
 # only necessary for older versions of glibc, but we might get some antique
 # software stacks on HPC machines.
 target_link_libraries(${KITRT}
   PUBLIC
-  ${LIB_LLVM}
   pthread
   rt
   dl)

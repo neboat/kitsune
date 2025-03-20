@@ -54,14 +54,21 @@
 #ifndef __KITRT_H__
 #define __KITRT_H__
 
-#include <cstdio>
 #include <cassert>
-#include <stdint.h>
-#include <stdlib.h>
+#include <cctype>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
-#include <execinfo.h>
+#include <deque>
+#include <limits>
+#include <stdexcept>
+#include <string>
 #include <type_traits>
-#include <ctype.h>
+#include <unordered_map>
+#include <utility>
+
+#include <execinfo.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -205,6 +212,93 @@ bool __kitrt_get_env_value(const char *var_name,
     
   return found;
 }
+
+extern "C" {
+void *__libc_malloc(std::size_t size);
+
+void __libc_free(void *ptr);
+}
+
+namespace kitrt {
+
+template <typename T> class GlibcAllocator {
+public:
+  // Standard allocator typedefs
+  using value_type = T;
+  using pointer = T *;
+  using const_pointer = const T *;
+  using reference = T &;
+  using const_reference = const T &;
+  using size_type = std::size_t;
+  using difference_type = std::ptrdiff_t;
+
+  // Rebind allocator to type U
+  template <typename U> struct rebind {
+    using other = GlibcAllocator<U>;
+  };
+
+  // Default constructor
+  GlibcAllocator() noexcept {}
+
+  // Copy constructor
+  template <typename U> GlibcAllocator(const GlibcAllocator<U> &) noexcept {}
+
+  // Allocate memory
+  pointer allocate(size_type n) {
+    if (n > max_size()) {
+      throw std::bad_alloc();
+    }
+
+    if (n == 0) {
+      return nullptr;
+    }
+
+    void *ptr = __libc_malloc(n * sizeof(T));
+    if (!ptr) {
+      throw std::bad_alloc();
+    }
+
+    return static_cast<pointer>(ptr);
+  }
+
+  // Deallocate memory
+  void deallocate(pointer p, size_type) noexcept { __libc_free(p); }
+
+  // Maximum number of objects that can be allocated
+  size_type max_size() const noexcept {
+    return std::numeric_limits<size_type>::max() / sizeof(T);
+  }
+
+  // Construct object at given address
+  template <typename U, typename... Args> void construct(U *p, Args &&...args) {
+    ::new (static_cast<void *>(p)) U(std::forward<Args>(args)...);
+  }
+
+  // Destroy object at given address
+  template <typename U> void destroy(U *p) { p->~U(); }
+};
+
+// Comparison operators
+template <typename T, typename U>
+bool operator==(const GlibcAllocator<T> &, const GlibcAllocator<U> &) noexcept {
+  return true;
+}
+
+template <typename T, typename U>
+bool operator!=(const GlibcAllocator<T> &, const GlibcAllocator<U> &) noexcept {
+  return false;
+}
+
+template <typename K, typename V>
+using unordered_map = std::unordered_map<K, V, std::hash<K>, std::equal_to<K>,
+                                         GlibcAllocator<std::pair<const K, V>>>;
+
+template <typename T> using deque = std::deque<T, GlibcAllocator<T>>;
+
+using string =
+    std::basic_string<char, std::char_traits<char>, GlibcAllocator<char>>;
+
+} // namespace kitrt
 
 #endif // __KITRT_H__
 

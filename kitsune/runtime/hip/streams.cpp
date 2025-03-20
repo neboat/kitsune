@@ -90,8 +90,8 @@
 // potentially enter similar runtime call sequences over a
 // long-running code and thus every thread will end up with its own
 // stream.
-// Stream creation can be expensive.  We "recycle" them when possible. 
-typedef std::deque<hipStream_t> KitHipStreamList;
+// Stream creation can be expensive.  We "recycle" them when possible.
+typedef kitrt::deque<hipStream_t> KitHipStreamList;
 static KitHipStreamList _kithip_streams;
 static std::mutex _kithip_stream_mutex;
 

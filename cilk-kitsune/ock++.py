@@ -273,12 +273,6 @@ class Invocation:
             [
                 f"{self.cilk_path}/bin/{self.cc}",
                 self.input_file,
-                # Include the malloc wrapper
-                *(
-                    ["-fvisibility-global-new-delete=force-hidden"]
-                    if self.replace_malloc
-                    else []
-                ),
                 # Disable some aggressive optimizations --- they should be done after
                 # code is flipped to device side
                 "-fno-unroll-loops",
@@ -408,14 +402,7 @@ class Invocation:
             [
                 f"{self.kitsune_path}/bin/kit++",
                 *input_files,
-                *(
-                    [
-                        "-fvisibility-global-new-delete=force-hidden",
-                        self.kitmalloc_path,
-                    ]
-                    if self.replace_malloc
-                    else []
-                ),
+                *([self.kitmalloc_path] if self.replace_malloc else []),
                 f"-O{self.opt_level}",
                 *self.linker_args,
                 # Link in CUDA runtime

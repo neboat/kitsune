@@ -64,8 +64,8 @@
 // system libraries that are missing the call...
 #define gettid() syscall(SYS_gettid)
 
-// Stream creation can be expensive.  We "recycle" them when possible. 
-typedef std::deque<CUstream> KitCudaStreamList;
+// Stream creation can be expensive.  We "recycle" them when possible.
+typedef kitrt::deque<CUstream> KitCudaStreamList;
 static KitCudaStreamList _kitcuda_streams;
 static std::mutex _kitcuda_stream_mutex;
 

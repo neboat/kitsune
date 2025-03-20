@@ -53,21 +53,21 @@
 
 #include "debug.h"
 
-namespace kitrt
-{
-  llvm::raw_fd_ostream &errs() {
-    // Set standard error to be unbuffered and tied to outs() by default.
-    static llvm::raw_fd_ostream S(2/*STDERR_FILENO*/, false, true);
-    return S;
-  }
+// namespace kitrt
+// {
+//   llvm::raw_fd_ostream &errs() {
+//     // Set standard error to be unbuffered and tied to outs() by default.
+//     static llvm::raw_fd_ostream S(2/*STDERR_FILENO*/, false, true);
+//     return S;
+//   }
 
-  llvm::raw_ostream &kitdbgs() {
-    static struct debug_strm {
-      llvm::circular_raw_ostream strm;
-     debug_strm()
-         : strm(kitrt::errs(), "**** Kitsune Runtime Debug Log ****")
-      {}
-    } kds;
-    return kds.strm;
-  }
-}
+//   llvm::raw_ostream &kitdbgs() {
+//     static struct debug_strm {
+//       llvm::circular_raw_ostream strm;
+//      debug_strm()
+//          : strm(kitrt::errs(), "**** Kitsune Runtime Debug Log ****")
+//       {}
+//     } kds;
+//     return kds.strm;
+//   }
+// }

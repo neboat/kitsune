@@ -50,11 +50,10 @@
  *===----------------------------------------------------------------------===
  */
 #include "kithip.h"
+#include <array> // IWYU pragma: keep (clang-tidy+tempaltes == bad???)
 #include <mutex>
 #include <stdint.h>
 #include <stdio.h>
-#include <string>
-#include <unordered_map> // IWYU pragma: keep (clang-tidy+tempaltes == bad???)
 
 // TODO: The hip runtime shares common implementation details 
 // with cuda.  At present we have decided to keep them separated
@@ -70,7 +69,7 @@
 // exploring reducing runtime overheads.
 //
 // TODO: Finish exploration of map vs. HIP call overheads.
-typedef std::unordered_map<const void *, hipModule_t> KitHipModuleMap;
+typedef kitrt::unordered_map<const void *, hipModule_t> KitHipModuleMap;
 static KitHipModuleMap _kithip_module_map;
 static std::mutex _kithip_module_map_mutex;
 
@@ -80,7 +79,7 @@ static std::mutex _kithip_module_map_mutex;
 // overheads.
 //
 // TODO: Finish exploration of map vs. CUDA call overheads.
-typedef std::unordered_map<const char *, hipFunction_t> KitHipKernelMap;
+typedef kitrt::unordered_map<const char *, hipFunction_t> KitHipKernelMap;
 static KitHipKernelMap _kithip_kernel_map;
 
 extern "C" {
@@ -117,7 +116,7 @@ void __kithip_set_default_threads_per_blk(int threads_per_blk) {
   _kithip_default_threads_per_blk = threads_per_blk;
 }
 
-typedef std::unordered_map<std::string, int> KitHipLaunchParamMap;
+typedef kitrt::unordered_map<kitrt::string, int> KitHipLaunchParamMap;
 static KitHipLaunchParamMap _kithip_launch_param_map;
 
 namespace {
@@ -224,8 +223,10 @@ void __kithip_get_launch_params(size_t trip_count, hipFunction_t kfunc,
 				const char *kfunc_name, 
                                 int &threads_per_blk, int &blks_per_grid,
 				const KitRTInstMix *inst_mix) {
-  std::string map_entry_name(kfunc_name);
-  map_entry_name += std::to_string(trip_count);
+  std::array<char, 256> map_entry_buf;
+  std::snprintf(map_entry_buf.data(), map_entry_buf.size(), "%s_%zu",
+                kfunc_name, trip_count);
+  kitrt::string map_entry_name(map_entry_buf.data());
 
   KitHipLaunchParamMap::iterator lpit = _kithip_launch_param_map.find(map_entry_name);
   if (lpit != _kithip_launch_param_map.end())

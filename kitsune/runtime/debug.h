@@ -54,8 +54,6 @@
 #ifndef __KITRT_DEBUG_H__
 #define __KITRT_DEBUG_H__
 
-#include<llvm/Support/raw_os_ostream.h>
-#include<llvm/Support/circular_raw_ostream.h>
 
 #ifdef KITRT_ENABLE_DEBUG
 #define KITRT_DEBUG(X) { {X;} }

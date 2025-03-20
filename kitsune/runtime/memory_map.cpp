@@ -55,7 +55,7 @@
 #include "kitrt.h"
 #include "memory_map.h"
 
-typedef std::unordered_map<void *, KitRTAllocMapEntry> KitRTAllocMap;
+typedef kitrt::unordered_map<void *, KitRTAllocMapEntry> KitRTAllocMap;
 static KitRTAllocMap _kitrt_alloc_map;
 
 void __kitrt_register_mem_alloc(void *addr, size_t size) {
