@@ -1803,6 +1803,8 @@ void llvm::fixupTaskFrameExternalUses(Spindle *TF, const TaskInfo &TI,
 
       // Examine all users of this instruction.
       for (Use &U : I.uses()) {
+        if (!DT.isReachableFromEntry(U))
+          continue;
         // If we find a live use outside of the task, it's an output.
         if (Instruction *UI = dyn_cast<Instruction>(U.getUser())) {
           if (!taskFrameEncloses(TF, UI->getParent(), TI)) {

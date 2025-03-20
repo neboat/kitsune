@@ -695,23 +695,10 @@ void DACSpawning::implementDACIterSpawnOnHelper(
         SplitBlock(Preheader, &Preheader->front(), (DomTreeUpdater *)nullptr,
                    nullptr, nullptr, Preheader->getName() + ".dac.head");
 
-    // Move any syncregion_start's in DACHead into Preheader.
-    BasicBlock::iterator InsertPoint = Preheader->begin();
-    for (BasicBlock::iterator I = DACHead->begin(), E = DACHead->end();
-         I != E;) {
-      IntrinsicInst *II = dyn_cast<IntrinsicInst>(I++);
-      if (!II)
-        continue;
-      if (Intrinsic::syncregion_start != II->getIntrinsicID())
-        continue;
-
-      while (isa<IntrinsicInst>(I) &&
-             Intrinsic::syncregion_start ==
-                 cast<IntrinsicInst>(I)->getIntrinsicID())
-        ++I;
-
-      Preheader->splice(InsertPoint, &*DACHead, II->getIterator(), I);
-    }
+    // Move the syncregion corresponding with the original loop into Preheader,
+    // so the new detach can use it.
+    if (Instruction *SyncRegionI = dyn_cast<Instruction>(SyncRegion))
+      SyncRegionI->moveBefore(&*Preheader->getFirstInsertionPt());
 
     if (!Preheader->getTerminator()->getDebugLoc())
       Preheader->getTerminator()->setDebugLoc(
