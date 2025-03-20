@@ -75,11 +75,13 @@ class Invocation:
     input_file: Path | None = None
     object_files: list[Path] = []
     temp_dir: Path | None = None
+    temp_dir_cleanup = lambda: None
     verbosity: int = 0
     debug: bool = False
     opt_level: int = 1
 
     cc: str = "clang++"
+    replace_malloc: bool = True
 
     @staticmethod
     def parse_from_args() -> "Invocation":
@@ -231,7 +233,7 @@ class Invocation:
                 except Exception as e:
                     logging.warning(f"Failed to clean up temporary directory: {e}")
 
-            atexit.register(cleanup_temp_dir)
+            self.temp_dir_cleanup = atexit.register(cleanup_temp_dir)
             logging.debug(f"Created intermediate directory at {self.temp_dir}")
 
         # Create the directory if it doesn't exist
@@ -240,7 +242,7 @@ class Invocation:
         to_remove = sum(
             [
                 list(self.temp_dir.glob(glob))
-                for glob in ["*.ll", "*.s", "*.kitsune", "*.ptx"]
+                for glob in ["*.ll", "*.s", "*.kitsune", "*.ptx", "*.o"]
             ],
             [],
         )
@@ -271,6 +273,12 @@ class Invocation:
             [
                 f"{self.cilk_path}/bin/{self.cc}",
                 self.input_file,
+                # Include the malloc wrapper
+                *(
+                    ["-fvisibility-global-new-delete=force-hidden"]
+                    if self.replace_malloc
+                    else []
+                ),
                 # Disable some aggressive optimizations --- they should be done after
                 # code is flipped to device side
                 "-fno-unroll-loops",
@@ -294,21 +302,33 @@ class Invocation:
         assert self.input_file is not None, "Input file not specified"
         return self.temp_dir / f"{self.input_file.stem}.kitsune.ll"
 
+    @property
+    def lowered_llvm_ir_output_file_aux_1(self) -> Path:
+        assert self.input_file is not None, "Input file not specified"
+        return self.temp_dir / f"{self.input_file.stem}.kitsune.aux.1.ll"
+
+    @property
+    def lowered_llvm_ir_output_file_aux_2(self) -> Path:
+        assert self.input_file is not None, "Input file not specified"
+        return self.temp_dir / f"{self.input_file.stem}.kitsune.aux.2.ll"
+
     def run_kitsune_lowering(self) -> None:
         """Run Kitsune's opt for IR lowering."""
 
         # TODO: re-introduce vectorization after tapir lowering
 
+        debug_flags = [
+            "--debug-only=cuabi",
+            "--debug-abi-calls",
+            "--verify-each",
+            "--cuabi-keep-files",
+            "--pass-remarks-analysis=loop-spawning",
+        ]
+
         _run_command(
             [
-                f"{self.cilk_path}/bin/opt",
+                f"{self.kitsune_path}/bin/opt",
                 f"-passes=tapir-lowering<O{self.opt_level}>",
-                # These flags are for debugging
-                # "--debug-only=cuabi",
-                # "--debug-abi-calls",
-                # "--verify-each",
-                # "--cuabi-keep-files",
-                # "--pass-remarks-analysis=loop-spawning",
                 # These flags are for lowering to OpenCilk
                 "--tapir-target=opencilk",
                 "--use-opencilk-runtime-bc",
@@ -323,27 +343,40 @@ class Invocation:
             cwd=self.temp_dir,
         )
 
-    @property
-    def assembly_output_file(self) -> Path:
-        assert self.input_file is not None, "Input file not specified"
-        return self.temp_dir / f"{self.input_file.stem}.kitsune.s"
-
-    def generate_assembly(self) -> None:
-        """Generate assembly from the lowered IR."""
-
-        _run_command(
-            [
-                f"{self.kitsune_path}/bin/llc",
-                "-filetype=asm",
-                "-relocation-model=pic",
-                self.lowered_llvm_ir_output_file,
-                "-o",
-                self.assembly_output_file,
-                *self.llc_args,
-            ],
-            f"Kitsune compiler dumped assembly to {self.assembly_output_file}",
-            # cwd=self.temp_dir,
-        )
+        return
+        # For precise diffing between Kitsune and OpenCilk lowering, to catch
+        # bug fixes not yet backported to Kitsune.
+        for p, out in [
+            (self.cilk_path, self.lowered_llvm_ir_output_file_aux_1),
+            (self.kitsune_path, self.lowered_llvm_ir_output_file_aux_2),
+        ]:
+            _run_command(
+                [
+                    f"{p}/bin/opt",
+                    f"-passes=tapir-lowering<O{self.opt_level}>",
+                    # These flags are for lowering to OpenCilk
+                    "--tapir-target=opencilk",
+                    "--use-opencilk-runtime-bc",
+                    f"--opencilk-runtime-bc-path={self.kitsune_path}/lib/clang/19/lib/x86_64-unknown-linux-gnu/libopencilk-abi.bc",
+                    "--debug-abi-calls",
+                    "-S",
+                    self.llvm_ir_output_file,
+                    "-o",
+                    out,
+                    *self.opt_args,
+                ],
+                f"Kitsune compiler lowered IR to {out}",
+                cwd=self.temp_dir,
+            )
+        # Compare the two files
+        if (
+            self.lowered_llvm_ir_output_file_aux_2.read_text().strip()
+            != self.lowered_llvm_ir_output_file_aux_1.read_text().strip()
+        ):
+            print("IRs differ")
+            print(self.lowered_llvm_ir_output_file_aux_1)
+            print(self.lowered_llvm_ir_output_file_aux_2)
+            atexit.unregister(self.temp_dir_cleanup)
 
     @property
     def kitmalloc_path(self) -> Path:
@@ -362,8 +395,6 @@ class Invocation:
         # accidentally overriding mallocs in the runtimes (which would cause
         # infinite recursion).
 
-        temp_output_file = self.temp_dir / "temp.o"
-
         input_files = (
             [self.lowered_llvm_ir_output_file]
             if self.input_file is not None
@@ -373,18 +404,19 @@ class Invocation:
         kitrt_dir = f"{self.kitsune_path}/tools/kitsune/kitrt/lib/clang/19/lib"
         opencilk_dir = f"{self.kitsune_path}/lib/clang/19/lib/x86_64-unknown-linux-gnu"
 
-        def is_archive_or_so(path: Path) -> bool:
-            return path.suffix == ".a" or re.match(r".*\.so(\.\d+)*$", path.name)
-
-        object_files = [obj for obj in input_files if not is_archive_or_so(obj)]
-        lib_files = [obj for obj in input_files if is_archive_or_so(obj)]
-        self.override_and_localize_symbols(object_files, temp_output_file)
-
         _run_command(
             [
                 f"{self.kitsune_path}/bin/kit++",
-                temp_output_file,
-                *lib_files,
+                *input_files,
+                *(
+                    [
+                        "-fvisibility-global-new-delete=force-hidden",
+                        self.kitmalloc_path,
+                    ]
+                    if self.replace_malloc
+                    else []
+                ),
+                f"-O{self.opt_level}",
                 *self.linker_args,
                 # Link in CUDA runtime
                 "-L/opt/cuda/lib64",
@@ -419,16 +451,13 @@ class Invocation:
         _run_command(
             [
                 f"{self.kitsune_path}/bin/kitcc",
+                f"-O{self.opt_level}",
                 self.lowered_llvm_ir_output_file,
                 *self.linker_args,
             ],
-            f"Kitsune compiler compiled to {self.assembly_output_file}",
-            cwd=self.temp_dir,
+            f"Kitsune compiler compiled to {output_file}",
             print_cmd=True,
         )
-        temp_output_file = self.temp_dir / "localized.o"
-        self.override_and_localize_symbols([output_file], temp_output_file)
-        shutil.copy(temp_output_file, output_file)
 
     def override_and_localize_symbols(
         self, obj_files: list[Path], output_obj_file: Path
