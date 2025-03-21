@@ -738,12 +738,13 @@ void CudaLoop::preProcessTapirLoop(TapirLoopInfo &TL, ValueToValueMapTy &VMap) {
       if (F->size() && not F->isIntrinsic()) {
         SmallVector<ReturnInst *, 8> Returns;
         Function *DeviceF = cast<Function>(VMap[F]);
-        CloneFunctionInto(DeviceF, F, VMap,
-                          CloneFunctionChangeType::DifferentModule, Returns);
-
-        LLVM_DEBUG(dbgs() << "cuabi: cloning device function '"
-                          << DeviceF->getName() << "' into kernel module.\n");
-
+        // Only clone if function does not yet have a body
+        if (DeviceF->size() == 0) {
+          CloneFunctionInto(DeviceF, F, VMap,
+                            CloneFunctionChangeType::DifferentModule, Returns);
+          LLVM_DEBUG(dbgs() << "cuabi: cloning device function '"
+                            << DeviceF->getName() << "' into kernel module.\n");
+        }
         // GPU calls are slow, try to force inlining...
         if (OptLevel > 1 && not DeviceF->hasFnAttribute(Attribute::NoInline))
           DeviceF->addFnAttr(Attribute::AlwaysInline);
