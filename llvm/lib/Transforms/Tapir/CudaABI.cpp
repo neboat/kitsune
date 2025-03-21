@@ -872,6 +872,7 @@ void CudaLoop::postProcessOutline(TapirLoopInfo &TLI, TaskOutlineInfo &Out,
   ClonedCond->setOperand(TripCountIdx, ThreadEnd);
 
   fixReducersInKernel(KernelF, ThreadIdx, BlockDim, VMap);
+  fixDebugInfoInKernel(KernelF);
 
   if (KeepIntermediateFiles) {
     std::error_code EC;
@@ -881,6 +882,106 @@ void CudaLoop::postProcessOutline(TapirLoopInfo &TLI, TaskOutlineInfo &Out,
         IRFileName, EC, sys::fs::OpenFlags::OF_None);
     KernelModule.print(PostLoopIRFile->os(), nullptr);
     PostLoopIRFile->keep();
+  }
+}
+
+void CudaLoop::fixDebugInfoInKernel(Function *KernelF) {
+  DISubprogram *OldSP = KernelF->getSubprogram();
+  if (!OldSP) {
+    return;
+  }
+  // Referenced from:
+  // https://github.com/llvm/llvm-project/commit/c10d0e5ccd12f049bddb24dcf8bbb7fbbc6c68f2
+  DISubprogram *NewSP = DISubprogram::getDistinct(
+      KernelF->getContext(), OldSP->getScope(), OldSP->getName(),
+      KernelF->getName(), OldSP->getFile(), OldSP->getLine(), OldSP->getType(),
+      OldSP->getScopeLine(), OldSP->getContainingType(),
+      OldSP->getVirtualIndex(), OldSP->getThisAdjustment(), OldSP->getFlags(),
+      OldSP->getSPFlags(), OldSP->getUnit(), OldSP->getTemplateParams(),
+      OldSP->getDeclaration(), OldSP->getRetainedNodes(),
+      OldSP->getThrownTypes(), OldSP->getAnnotations(),
+      OldSP->getTargetFuncName());
+  DenseMap<const MDNode *, MDNode *> Cache;
+  const auto ReparentScope = [&](LLVMContext &Ctx, DIScope *Scope) {
+    SmallVector<DIScope *, 3> ScopeChain;
+    DIScope *Last = NewSP;
+    DIScope *CurScope = Scope;
+    do {
+      if (auto *SP = dyn_cast<DISubprogram>(CurScope)) {
+        // Don't rewrite this scope chain if it doesn't lead to the replaced SP.
+        if (SP != OldSP)
+          return Scope;
+        Cache.insert({OldSP, NewSP});
+        break;
+      }
+      if (auto *Found = Cache[CurScope]) {
+        Last = cast<DIScope>(Found);
+        break;
+      }
+      ScopeChain.push_back(CurScope);
+    } while ((CurScope = CurScope->getScope()));
+    // Starting from the top, rebuild the nodes to point to the new inlined-at
+    // location (then rebuilding the rest of the chain behind it) and update the
+    // map of already-constructed inlined-at nodes.
+    for (const DIScope *MD : reverse(ScopeChain)) {
+      if (auto *LB = dyn_cast<DILexicalBlock>(MD))
+        Cache[MD] = Last = DILexicalBlock::getDistinct(
+            Ctx, Last, LB->getFile(), LB->getLine(), LB->getColumn());
+      else if (auto *LB = dyn_cast<DILexicalBlockFile>(MD))
+        Cache[MD] = Last = DILexicalBlockFile::getDistinct(
+            Ctx, Last, LB->getFile(), LB->getDiscriminator());
+      else
+        llvm_unreachable("illegal parent scope");
+    }
+    return Last;
+  };
+  const auto ReparentLocation = [&](LLVMContext &Ctx, DILocation *DL) {
+    DILocation *InlinedAt = DL->getInlinedAt();
+    if (InlinedAt) {
+      while (auto *IA = InlinedAt->getInlinedAt())
+        InlinedAt = IA;
+      DIScope *NewScope = ReparentScope(Ctx, InlinedAt->getScope());
+      InlinedAt = DILocation::get(Ctx, InlinedAt->getLine(),
+                                  InlinedAt->getColumn(), NewScope);
+    }
+    return DILocation::get(
+        Ctx, DL->getLine(), DL->getColumn(), ReparentScope(Ctx, DL->getScope()),
+        DebugLoc::appendInlinedAt(DL, InlinedAt, Ctx, Cache));
+  };
+  const auto ReparentDebugInfo = [&](Instruction &I) {
+    auto DL = I.getDebugLoc();
+    auto &Ctx = I.getContext();
+    if (DL)
+      I.setDebugLoc(ReparentLocation(Ctx, DL.get()));
+    if (auto *MD = I.getMetadata(LLVMContext::MD_loop)) {
+      for (unsigned I = 1; I < MD->getNumOperands(); I++) {
+        if (auto *DIL = dyn_cast_or_null<DILocation>(MD->getOperand(I))) {
+          MD->replaceOperandWith(I, ReparentLocation(Ctx, DIL));
+        }
+      }
+    }
+    // Fix up debug variables to point to NewSP.
+    const auto ReparentVar = [&](DILocalVariable *Var) {
+      return DILocalVariable::getDistinct(
+          Ctx, cast<DILocalScope>(ReparentScope(Ctx, Var->getScope())),
+          Var->getName(), Var->getFile(), Var->getLine(), Var->getType(),
+          Var->getArg(), Var->getFlags(), Var->getAlignInBits(),
+          Var->getAnnotations());
+    };
+    if (auto *DbgValue = dyn_cast<DbgValueInst>(&I)) {
+      auto *Var = DbgValue->getVariable();
+      I.setOperand(2, MetadataAsValue::get(Ctx, ReparentVar(Var)));
+    } else if (auto *DbgDeclare = dyn_cast<DbgDeclareInst>(&I)) {
+      auto *Var = DbgDeclare->getVariable();
+      I.setOperand(1, MetadataAsValue::get(Ctx, ReparentVar(Var)));
+    }
+  };
+
+  KernelF->setSubprogram(NewSP);
+  for (BasicBlock &BB : *KernelF) {
+    for (Instruction &I : BB) {
+      ReparentDebugInfo(I);
+    }
   }
 }
 

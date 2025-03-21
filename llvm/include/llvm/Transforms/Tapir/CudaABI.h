@@ -296,6 +296,8 @@ public:
   void fixReducersInKernel(Function *KernelF, Value *ThreadIdx, Value *BlockDim,
                            ValueToValueMapTy &VMap);
 
+  void fixDebugInfoInKernel(Function *KernelF);
+
   void processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo & TOI,
                                DominatorTree &DT) override final;
   void transformForPTX(Function &F);
