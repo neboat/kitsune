@@ -52,18 +52,25 @@
 #include "kitcuda_dylib.h"
 #include "memory_map.h"
 #include <mutex>
+#include <unordered_set>
 
 static std::mutex _kitcuda_mem_alloc_mutex;
+static std::unordered_set<void *> _kitcuda_big_blocks;
+
+static constexpr size_t BIG_BLOCK_THRESHOLD = 4096;
+
+struct ThreadLocalData {
+  uintptr_t cur_block = 0;
+  size_t capacity_remaining = 0;
+};
+
+static thread_local ThreadLocalData _kitcuda_tls_data;
 
 extern "C" {
 
-__attribute__((malloc)) void *__kitcuda_mem_alloc_managed(size_t size) {
-  KIT_NVTX_PUSH("kitcuda:mem_alloc_managed",KIT_NVTX_MEM);
-
-  extern bool _kitcuda_initialized;
-  if (not _kitcuda_initialized)
-    __kitcuda_initialize();
-
+static __attribute__((malloc)) void *
+__kitcuda_mem_alloc_managed_internal(size_t size) {
+  KIT_NVTX_PUSH("kitcuda:mem_alloc_managed", KIT_NVTX_MEM);
   CUcontext curctx;
   CU_SAFE_CALL(cuCtxGetCurrent_p(&curctx));
   if (curctx == NULL)
@@ -85,18 +92,54 @@ __attribute__((malloc)) void *__kitcuda_mem_alloc_managed(size_t size) {
   int enable = 1;
   CU_SAFE_CALL(
       cuPointerSetAttribute_p(&enable, CU_POINTER_ATTRIBUTE_SYNC_MEMOPS, devp));
+  KIT_NVTX_POP();
+
+  // NOTE: We can no longer do this in a thread-safe manner...
+  // CU_SAFE_CALL(cuMemPrefetchAsync_p(devp, size, _kitcuda_device,
+  //                                  __kitcuda_get_thread_stream()));
+  return reinterpret_cast<void *>(devp);
+}
+
+__attribute__((malloc)) void *
+__kitcuda_mem_alloc_managed_aligned(size_t size, size_t alignment) {
+
+  extern bool _kitcuda_initialized;
+  if (not _kitcuda_initialized)
+    __kitcuda_initialize();
+
+  void *ret = nullptr;
+
+  if (size < BIG_BLOCK_THRESHOLD) {
+    ThreadLocalData &tls_data = _kitcuda_tls_data;
+    size_t to_align =
+        ((tls_data.cur_block + alignment - 1) & ~(alignment - 1)) -
+        tls_data.cur_block;
+    size += to_align;
+    if (size > tls_data.capacity_remaining) {
+      tls_data.cur_block = reinterpret_cast<uintptr_t>(
+          __kitcuda_mem_alloc_managed_internal(BIG_BLOCK_THRESHOLD));
+      tls_data.capacity_remaining = BIG_BLOCK_THRESHOLD;
+      to_align = 0;
+    }
+    ret = reinterpret_cast<void *>(tls_data.cur_block + to_align);
+    tls_data.cur_block += size;
+    tls_data.capacity_remaining -= size;
+    _kitcuda_mem_alloc_mutex.lock();
+  } else {
+    ret = reinterpret_cast<void *>(__kitcuda_mem_alloc_managed_internal(size));
+    _kitcuda_mem_alloc_mutex.lock();
+  }
 
   // Register this allocation so the runtime can help track the
   // locality (and affinity) of data.
-  _kitcuda_mem_alloc_mutex.lock();
-  __kitrt_register_mem_alloc((void *)devp, size);
+  __kitrt_register_mem_alloc(ret, size);
   _kitcuda_mem_alloc_mutex.unlock();
+  return ret;
+}
 
-  // NOTE: We can no longer do this in a thread-safe manner... 
-  //CU_SAFE_CALL(cuMemPrefetchAsync_p(devp, size, _kitcuda_device,
-  //                                  __kitcuda_get_thread_stream()));
-  KIT_NVTX_POP();
-  return (void *)devp;
+__attribute__((malloc)) void *__kitcuda_mem_alloc_managed(size_t size) {
+  return __kitcuda_mem_alloc_managed_aligned(size,
+                                             __STDCPP_DEFAULT_NEW_ALIGNMENT__);
 }
 
 __attribute__((malloc)) void *
@@ -125,7 +168,7 @@ __kitcuda_mem_calloc_managed(size_t count, size_t element_size) {
 }
 
 __attribute__((malloc)) void *__kitcuda_mem_realloc_managed(void *ptr,
-                                                             size_t size) {
+                                                            size_t size) {
   assert(size != 0 && "zero-valued size!");
 
   KIT_NVTX_PUSH("kitcuda:realloc_managed", KIT_NVTX_MEM);
@@ -167,20 +210,34 @@ __attribute__((malloc)) void *__kitcuda_mem_realloc_managed(void *ptr,
 void __kitcuda_mem_free(void *vp) {
   assert(vp && "unexpected null pointer!");
 
-  KIT_NVTX_PUSH("kitcuda:mem_free", KIT_NVTX_MEM);
   // We first remove the allocation from the runtime's
   // map, and then actually release it via CUDA...
   // Note that the versioned free calls are important
   // here -- a non-v2 version will actually result in
   // crashes...
+
+  bool is_big_block = false;
   _kitcuda_mem_alloc_mutex.lock();
   __kitrt_unregister_mem_alloc(vp);
+  is_big_block = _kitcuda_big_blocks.count(vp) > 0;
+  if (is_big_block)
+    _kitcuda_big_blocks.erase(vp);
   _kitcuda_mem_alloc_mutex.unlock();
-  CU_SAFE_CALL(cuMemFree_v2_p((CUdeviceptr)vp));
-  KIT_NVTX_POP();
+  if (is_big_block) {
+    KIT_NVTX_PUSH("kitcuda:mem_free", KIT_NVTX_MEM);
+    CU_SAFE_CALL(cuMemFree_v2_p((CUdeviceptr)vp));
+    KIT_NVTX_POP();
+  }
 }
 
 void __kitcuda_mem_destroy(void *vp) {
+  _kitcuda_mem_alloc_mutex.lock();
+  if (_kitcuda_big_blocks.count(vp) > 0) {
+    _kitcuda_big_blocks.erase(vp);
+    _kitcuda_mem_alloc_mutex.unlock();
+    return;
+  }
+  _kitcuda_mem_alloc_mutex.unlock();
   // This entry point is used to clean up only the
   // CUDA portions of an allocation -- it is used
   // by the runtime at program exit.
@@ -207,7 +264,7 @@ bool __kitcuda_is_mem_managed(void *vp) {
 
 // NOTE: See within the code below for notes about the prefetching
 // semantics.
-void* __kitcuda_mem_gpu_prefetch(void *vp, void *opaque_stream) {
+void *__kitcuda_mem_gpu_prefetch(void *vp, void *opaque_stream) {
   assert(vp && "unexpected null pointer!");
 
   KIT_NVTX_PUSH("kitcuda:mem_gpu_prefetch", KIT_NVTX_MEM);
@@ -266,31 +323,30 @@ void* __kitcuda_mem_gpu_prefetch(void *vp, void *opaque_stream) {
                                  CU_MEM_ADVISE_SET_PREFERRED_LOCATION,
                                  _kitcuda_device));
 
-
-
-      // Issue a prefetch request on the provided stream.  If the given 
-      // stream is null, create a new stream and return it. Once issued 
-      // go ahead and mark the memory as having been prefetched.  This 
-      // "mark" does not guarantee prefetching is complete it simply 
+      // Issue a prefetch request on the provided stream.  If the given
+      // stream is null, create a new stream and return it. Once issued
+      // go ahead and mark the memory as having been prefetched.  This
+      // "mark" does not guarantee prefetching is complete it simply
       // flags that the "instruction" has been issued by the runtime.
       CUstream cu_stream;
-      if (opaque_stream) 
+      if (opaque_stream)
         cu_stream = (CUstream)opaque_stream;
-      else 
+      else
         cu_stream = (CUstream)__kitcuda_get_thread_stream();
 
       CU_SAFE_CALL(cuMemPrefetchAsync_p((CUdeviceptr)vp, size, _kitcuda_device,
                                         cu_stream));
       __kitrt_mark_mem_prefetched(vp);
-      return (void*)cu_stream;
+      KIT_NVTX_POP();
+      return (void *)cu_stream;
     }
   }
   KIT_NVTX_POP();
-  // no prefetch, no bound stream to bound it to... 
+  // no prefetch, no bound stream to bound it to...
   return nullptr;
 }
 
-void* __kitcuda_mem_host_prefetch(void *vp, void *opaque_stream) {
+void *__kitcuda_mem_host_prefetch(void *vp, void *opaque_stream) {
   assert(vp && "unexpected null pointer!");
 
   KIT_NVTX_PUSH("kitcuda:mem_host_prefetch", KIT_NVTX_MEM);
@@ -327,14 +383,15 @@ void* __kitcuda_mem_host_prefetch(void *vp, void *opaque_stream) {
       // not guarantee prefetching is complete it simply flags that
       // the "instruction" has been issued by the runtime.
       CUstream cu_stream;
-      if (opaque_stream) 
+      if (opaque_stream)
         cu_stream = (CUstream)opaque_stream;
-      else 
+      else
         cu_stream = (CUstream)__kitcuda_get_thread_stream();
 
       CU_SAFE_CALL(cuMemPrefetchAsync_p((CUdeviceptr)vp, size, CU_DEVICE_CPU,
                                         cu_stream));
       __kitrt_set_mem_prefetch(vp, false);
+      KIT_NVTX_POP();
       return cu_stream;
     }
   }
@@ -351,5 +408,67 @@ void __kitcuda_memcpy_sym_to_device(void *hostPtr, uint64_t devPtr,
   KIT_NVTX_PUSH("kitcuda:memcpy_sym_to_device", KIT_NVTX_MEM);
   CU_SAFE_CALL(cuMemcpyHtoD_v2_p(devPtr, hostPtr, size));
   KIT_NVTX_POP();
+}
+
+void __kitcuda_memcpy(void *dst, void *src, size_t size) {
+  // For now, just use the host memcpy.
+  if (size < 4096) {
+    // Small memcpy, use the host memcpy anyways because a pagefault doesn't
+    // hurt as much.
+    memcpy(dst, src, size);
+    return;
+  }
+  extern bool _kitcuda_initialized;
+  if (not _kitcuda_initialized)
+    __kitcuda_initialize();
+
+  if (!__kitcuda_is_mem_managed(dst) || !__kitcuda_is_mem_managed(src)) {
+    // At least one of dst or src is unmanaged, use the host memcpy.
+    memcpy(dst, src, size);
+    return;
+  }
+  CUcontext curctx;
+  CU_SAFE_CALL(cuCtxGetCurrent_p(&curctx));
+  if (curctx == NULL)
+    CU_SAFE_CALL(cuCtxSetCurrent_p(_kitcuda_context));
+
+  CU_SAFE_CALL(cuMemcpy_p(reinterpret_cast<CUdeviceptr>(dst),
+                          reinterpret_cast<CUdeviceptr>(src), size));
+}
+
+void __kitcuda_memmove(void *dst, void *src, size_t size) {
+  const auto diff = std::abs(reinterpret_cast<intptr_t>(dst) -
+                             reinterpret_cast<intptr_t>(src));
+  if (diff < size) {
+    // If the memory regions overlap, use memmove because cuMemcpy can't handle
+    // it anyways.
+    memmove(dst, src, size);
+    return;
+  }
+  // No overlap, use our optimized memcpy implementation
+  __kitcuda_memcpy(dst, src, size);
+}
+
+void __kitcuda_memset(void *dst, uint8_t value, size_t size) {
+  if (size < 4096) {
+    memset(dst, value, size);
+    return;
+  }
+
+  extern bool _kitcuda_initialized;
+  if (not _kitcuda_initialized)
+    __kitcuda_initialize();
+
+  CUcontext curctx;
+  CU_SAFE_CALL(cuCtxGetCurrent_p(&curctx));
+  if (curctx == NULL)
+    CU_SAFE_CALL(cuCtxSetCurrent_p(_kitcuda_context));
+
+  if (__kitcuda_is_mem_managed(dst)) {
+    CU_SAFE_CALL(
+        cuMemsetD8_v2_p(reinterpret_cast<CUdeviceptr>(dst), value, size));
+  } else {
+    memset(dst, value, size);
+  }
 }
 }

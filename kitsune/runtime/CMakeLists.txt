@@ -42,6 +42,7 @@ set(KITRT_SRCS
 set(KITRT kitrt)
 
 add_library(${KITRT} SHARED ${KITRT_SRCS})
+set_property(TARGET ${KITRT} PROPERTY INTERPROCEDURAL_OPTIMIZATION ON)
 
 if (KITRT_ENABLE_DEBUG)
   target_compile_definitions(${KITRT} -D_KITRT_DEBUG_)

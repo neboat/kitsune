@@ -114,6 +114,7 @@ DECLARE_DLSYM(cuModuleGetGlobal_v2);
 DECLARE_DLSYM(cuMemAllocManaged);
 DECLARE_DLSYM(cuMemAllocHost);
 DECLARE_DLSYM(cuMemHostAlloc);
+DECLARE_DLSYM(cuMemsetD8_v2);
 DECLARE_DLSYM(cuMemsetD8Async);
 DECLARE_DLSYM(cuMemFree_v2);
 DECLARE_DLSYM(cuMemPrefetchAsync);

@@ -154,6 +154,7 @@ bool __kitcuda_load_symbols() {
   DLSYM_LOAD(cuPointerSetAttribute);
   DLSYM_LOAD(cuMemcpy);
   DLSYM_LOAD(cuMemcpyHtoD_v2);
+  DLSYM_LOAD(cuMemsetD8_v2);
 
   /* Error handling */
   DLSYM_LOAD(cuGetErrorName);
