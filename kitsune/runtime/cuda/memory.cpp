@@ -51,13 +51,15 @@
 #include "kitcuda.h"
 #include "kitcuda_dylib.h"
 #include "memory_map.h"
+
+#include <atomic>
+#include <cstdio>
 #include <mutex>
-#include <unordered_set>
 
 static std::mutex _kitcuda_mem_alloc_mutex;
-static std::unordered_set<void *> _kitcuda_big_blocks;
+static kitrt::unordered_set<void *> _kitcuda_big_blocks;
 
-static constexpr size_t BIG_BLOCK_THRESHOLD = 4096;
+size_t _kitcuda_big_block_threshold = 4096;
 
 struct ThreadLocalData {
   uintptr_t cur_block = 0;
@@ -65,6 +67,24 @@ struct ThreadLocalData {
 };
 
 static thread_local ThreadLocalData _kitcuda_tls_data;
+
+struct Chunk {
+  void *ptr;
+  Chunk *next;
+};
+static std::atomic<Chunk *> _kitcuda_chunk_list{nullptr};
+static std::atomic_size_t _kitcuda_chunk_fragmentation{0};
+
+// Reducer cache
+
+struct ReducerCacheSizeClass {
+  std::mutex mutex;
+  kitrt::vector<void *> cache;
+};
+
+static constexpr size_t N_REDUCER_CACHE_SIZE_CLASSES = 32;
+static ReducerCacheSizeClass
+    _kitcuda_reducer_cache[N_REDUCER_CACHE_SIZE_CLASSES];
 
 extern "C" {
 
@@ -109,16 +129,28 @@ __kitcuda_mem_alloc_managed_aligned(size_t size, size_t alignment) {
 
   void *ret = nullptr;
 
-  if (size < BIG_BLOCK_THRESHOLD) {
+  if (size < _kitcuda_big_block_threshold) {
     ThreadLocalData &tls_data = _kitcuda_tls_data;
     size_t to_align =
         ((tls_data.cur_block + alignment - 1) & ~(alignment - 1)) -
         tls_data.cur_block;
     size += to_align;
     if (size > tls_data.capacity_remaining) {
+      _kitcuda_chunk_fragmentation += tls_data.capacity_remaining;
       tls_data.cur_block = reinterpret_cast<uintptr_t>(
-          __kitcuda_mem_alloc_managed_internal(BIG_BLOCK_THRESHOLD));
-      tls_data.capacity_remaining = BIG_BLOCK_THRESHOLD;
+          __kitcuda_mem_alloc_managed_internal(_kitcuda_big_block_threshold));
+      Chunk *new_chunk = reinterpret_cast<Chunk *>(malloc(sizeof(Chunk)));
+      // ^ Don't use new because new might have been replaced to use this
+      // library and we might end up with infinite recursion.
+      new_chunk->ptr = reinterpret_cast<void *>(tls_data.cur_block);
+      // Insert the new chunk to our chunklist via CAS
+      Chunk *next = _kitcuda_chunk_list.load(std::memory_order_acquire);
+      do {
+        new_chunk->next = next;
+      } while (!_kitcuda_chunk_list.compare_exchange_strong(
+          next, new_chunk, std::memory_order_acq_rel,
+          std::memory_order_acquire));
+      tls_data.capacity_remaining = _kitcuda_big_block_threshold;
       to_align = 0;
     }
     ret = reinterpret_cast<void *>(tls_data.cur_block + to_align);
@@ -128,6 +160,7 @@ __kitcuda_mem_alloc_managed_aligned(size_t size, size_t alignment) {
   } else {
     ret = reinterpret_cast<void *>(__kitcuda_mem_alloc_managed_internal(size));
     _kitcuda_mem_alloc_mutex.lock();
+    _kitcuda_big_blocks.insert(ret);
   }
 
   // Register this allocation so the runtime can help track the
@@ -219,9 +252,10 @@ void __kitcuda_mem_free(void *vp) {
   bool is_big_block = false;
   _kitcuda_mem_alloc_mutex.lock();
   __kitrt_unregister_mem_alloc(vp);
-  is_big_block = _kitcuda_big_blocks.count(vp) > 0;
-  if (is_big_block)
-    _kitcuda_big_blocks.erase(vp);
+  if (auto it = _kitcuda_big_blocks.find(vp); it != _kitcuda_big_blocks.end()) {
+    is_big_block = true;
+    _kitcuda_big_blocks.erase(it);
+  }
   _kitcuda_mem_alloc_mutex.unlock();
   if (is_big_block) {
     KIT_NVTX_PUSH("kitcuda:mem_free", KIT_NVTX_MEM);
@@ -231,19 +265,42 @@ void __kitcuda_mem_free(void *vp) {
 }
 
 void __kitcuda_mem_destroy(void *vp) {
+  KIT_NVTX_PUSH("kitcuda: mem_destroy", KIT_NVTX_MEM);
+  bool is_big_block = false;
   _kitcuda_mem_alloc_mutex.lock();
-  if (_kitcuda_big_blocks.count(vp) > 0) {
-    _kitcuda_big_blocks.erase(vp);
-    _kitcuda_mem_alloc_mutex.unlock();
-    return;
+  if (auto it = _kitcuda_big_blocks.find(vp); it != _kitcuda_big_blocks.end()) {
+    is_big_block = true;
+    _kitcuda_big_blocks.erase(it);
   }
   _kitcuda_mem_alloc_mutex.unlock();
-  // This entry point is used to clean up only the
-  // CUDA portions of an allocation -- it is used
-  // by the runtime at program exit.
-  KIT_NVTX_PUSH("kitcuda: mem_destroy", KIT_NVTX_MEM);
-  CU_SAFE_CALL(cuMemFree_v2_p((CUdeviceptr)vp));
+  if (is_big_block) {
+    // This entry point is used to clean up only the
+    // CUDA portions of an allocation -- it is used
+    // by the runtime at program exit.
+    // CU_SAFE_CALL(cuMemFree_v2_p((CUdeviceptr)vp));
+    if (cuMemFree_v2_p((CUdeviceptr)vp) != CUDA_SUCCESS) {
+      fprintf(stderr, "kitcuda: warning, failed to free memory: %p\n", vp);
+    }
+  }
   KIT_NVTX_POP();
+}
+
+void __kitcuda_destroy_mem_chunks() {
+  size_t total_alloc = 0;
+  for (Chunk *chunk = _kitcuda_chunk_list.load(); chunk;) {
+    Chunk *next = chunk->next;
+    total_alloc += _kitcuda_big_block_threshold;
+    CU_SAFE_CALL(cuMemFree_v2_p((CUdeviceptr)chunk->ptr));
+    free(chunk);
+    chunk = next;
+  }
+  _kitcuda_chunk_list.store(nullptr);
+  fprintf(stderr,
+          "kitcuda: freed all memory chunks, fragmentation: %zu / %zu = %.3f\n",
+          _kitcuda_chunk_fragmentation.load(), total_alloc,
+          static_cast<double>(_kitcuda_chunk_fragmentation.load()) /
+              total_alloc);
+  _kitcuda_chunk_fragmentation.store(0);
 }
 
 bool __kitcuda_is_mem_managed(void *vp) {
@@ -340,6 +397,9 @@ void *__kitcuda_mem_gpu_prefetch(void *vp, void *opaque_stream) {
       KIT_NVTX_POP();
       return (void *)cu_stream;
     }
+  } else if (!__kitcuda_is_mem_managed(vp)) {
+    // We are cooked
+    fprintf(stderr, "kitcuda: warning, prefetching unmanaged memory: %p\n", vp);
   }
   KIT_NVTX_POP();
   // no prefetch, no bound stream to bound it to...
@@ -351,18 +411,6 @@ void *__kitcuda_mem_host_prefetch(void *vp, void *opaque_stream) {
 
   KIT_NVTX_PUSH("kitcuda:mem_host_prefetch", KIT_NVTX_MEM);
 
-  // TODO: Prefetching details and approaches need to be further
-  // explored.  In particular, in concert with compiler analysis and
-  // code generation.
-  //
-  // The semantics here are tricky and we don't have enough
-  // information to guarantee "smart" behavior yet.  If we have ever
-  // issued a prefetch to the device (gpu) it will show here as
-  // prefetched.  In this case we assume a prefetch back to the host
-  // is preferred and will let it proceed.  There are obviously cases
-  // where this is helpful and others where it will lead to page
-  // faults and evictions.  Little work has been done with host-side
-  // prefetch requests.
   size_t size;
   if (__kitrt_is_mem_prefetched(vp, &size)) {
     if (size > 0) {
@@ -410,6 +458,81 @@ void __kitcuda_memcpy_sym_to_device(void *hostPtr, uint64_t devPtr,
   KIT_NVTX_POP();
 }
 
+void *__kitcuda_mem_alloc_and_copy_to_device(void *host_ptr, size_t size,
+                                             void **dev_ptr,
+                                             void *opaque_stream) {
+  CUcontext cu_context;
+  CU_SAFE_CALL(cuCtxGetCurrent_p(&cu_context));
+  if (cu_context == NULL)
+    CU_SAFE_CALL(cuCtxSetCurrent_p(_kitcuda_context));
+
+  KIT_NVTX_PUSH("kitcuda:mem_alloc_device_and_copy", KIT_NVTX_MEM);
+  CUstream cu_stream = opaque_stream ? (CUstream)opaque_stream
+                                     : (CUstream)__kitcuda_get_thread_stream();
+
+  const size_t size_class =
+      64 - __builtin_clzll(size - 1); // Round up to nearest power of 2
+
+  if (size_class < N_REDUCER_CACHE_SIZE_CLASSES) {
+    ReducerCacheSizeClass &reducer_cache = _kitcuda_reducer_cache[size_class];
+    reducer_cache.mutex.lock();
+    if (!reducer_cache.cache.empty()) {
+      *dev_ptr = reducer_cache.cache.back();
+      reducer_cache.cache.pop_back();
+      reducer_cache.mutex.unlock();
+    } else {
+      reducer_cache.mutex.unlock();
+      CU_SAFE_CALL(cuMemAlloc_v2_p((CUdeviceptr *)dev_ptr, 1L << size_class));
+    }
+  } else {
+    // I don't think this is ever going to happen, but just in case...
+    CU_SAFE_CALL(cuMemAlloc_v2_p((CUdeviceptr *)dev_ptr, size));
+  }
+
+  CU_SAFE_CALL(
+      cuMemcpyHtoDAsync_v2_p((CUdeviceptr)*dev_ptr, host_ptr, size, cu_stream));
+  KIT_NVTX_POP();
+  return cu_stream;
+}
+
+void *__kitcuda_mem_copy_and_free_from_device(void *host_ptr, size_t size,
+                                              void *dev_ptr,
+                                              void *opaque_stream) {
+  // Skip context check because we assume __kitcuda_mem_alloc_and_copy_to_device
+  // was called before.
+  KIT_NVTX_PUSH("kitcuda:mem_copy_device_and_free", KIT_NVTX_MEM);
+  CUstream cu_stream = opaque_stream ? (CUstream)opaque_stream
+                                     : (CUstream)__kitcuda_get_thread_stream();
+  CU_SAFE_CALL(
+      cuMemcpyDtoHAsync_v2_p(host_ptr, (CUdeviceptr)dev_ptr, size, cu_stream));
+
+  const size_t size_class =
+      64 - __builtin_clzll(size - 1); // Round up to nearest power of 2
+  if (size_class < N_REDUCER_CACHE_SIZE_CLASSES) {
+    ReducerCacheSizeClass &reducer_cache = _kitcuda_reducer_cache[size_class];
+    reducer_cache.mutex.lock();
+    reducer_cache.cache.push_back(dev_ptr);
+    reducer_cache.mutex.unlock();
+  } else {
+    CU_SAFE_CALL(cuMemFree_v2_p((CUdeviceptr)dev_ptr));
+  }
+
+  KIT_NVTX_POP();
+  return cu_stream;
+}
+
+void __kitcuda_destroy_reducer_cache() {
+  for (size_t i = 0; i < 32; ++i) {
+    ReducerCacheSizeClass &reducer_cache = _kitcuda_reducer_cache[i];
+    reducer_cache.mutex.lock();
+    for (void *ptr : reducer_cache.cache) {
+      CU_SAFE_CALL(cuMemFree_v2_p((CUdeviceptr)ptr));
+    }
+    reducer_cache.cache.clear();
+    reducer_cache.mutex.unlock();
+  }
+}
+
 void __kitcuda_memcpy(void *dst, void *src, size_t size) {
   // For now, just use the host memcpy.
   if (size < 4096) {
@@ -437,11 +560,12 @@ void __kitcuda_memcpy(void *dst, void *src, size_t size) {
 }
 
 void __kitcuda_memmove(void *dst, void *src, size_t size) {
-  const auto diff = std::abs(reinterpret_cast<intptr_t>(dst) -
-                             reinterpret_cast<intptr_t>(src));
-  if (diff < size) {
-    // If the memory regions overlap, use memmove because cuMemcpy can't handle
-    // it anyways.
+  const auto dst_ = reinterpret_cast<uintptr_t>(dst);
+  const auto src_ = reinterpret_cast<uintptr_t>(src);
+  if (dst_ < src_ + size && src_ < dst_ + size) {
+    // Memory regions overlap, use memmove because cuMemCpy doesn't really
+    // handle this well. Page faults are the price we have to pay for such edge
+    // cases (meh).
     memmove(dst, src, size);
     return;
   }

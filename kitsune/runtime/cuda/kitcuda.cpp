@@ -74,6 +74,8 @@ int _kitcuda_device_id = -1;
 CUdevice _kitcuda_device = -1;
 CUcontext _kitcuda_context;
 
+extern size_t _kitcuda_big_block_threshold;
+
 // TODO: We currently don't use these values within the runtime but
 // need to do so!
 static int _kitcuda_driver_version;
@@ -222,6 +224,16 @@ bool __kitcuda_initialize() {
                         enable_refine_occ_launch);
   __kitcuda_refine_occupancy_launches(enable_refine_occ_launch);
 
+  // If KITCUDA_BIG_BLOCK_THRESHOLD is set, use it to set the threshold
+  if (__kitrt_get_env_value("KITCUDA_BIG_BLOCK_THRESHOLD",
+                            _kitcuda_big_block_threshold)) {
+    if (__kitrt_verbose_mode())
+      fprintf(stderr, "  kitcuda: big block threshold: %zu\n",
+              _kitcuda_big_block_threshold);
+  } else {
+    _kitcuda_big_block_threshold = 4096; // 4KB
+  }
+
   KIT_NVTX_POP();
   return _kitcuda_initialized;
 }
@@ -233,6 +245,8 @@ void __kitcuda_destroy() {
   KIT_NVTX_PUSH("kitcuda:destroy", KIT_NVTX_CLEANUP);
   __kitcuda_destroy_thread_streams();
   __kitrt_destroy_memory_map(__kitcuda_mem_destroy);
+  __kitcuda_destroy_reducer_cache();
+  __kitcuda_destroy_mem_chunks();
   // Note that all resources associated with the context will be destroyed.
   CU_SAFE_CALL(cuDevicePrimaryCtxReset_v2_p(_kitcuda_device));
   _kitcuda_initialized = false;

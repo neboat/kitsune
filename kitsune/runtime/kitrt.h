@@ -66,7 +66,9 @@
 #include <string>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include <execinfo.h>
 
@@ -289,11 +291,17 @@ bool operator!=(const GlibcAllocator<T> &, const GlibcAllocator<U> &) noexcept {
   return false;
 }
 
+template <typename T>
+using unordered_set =
+    std::unordered_set<T, std::hash<T>, std::equal_to<T>, GlibcAllocator<T>>;
+
 template <typename K, typename V>
 using unordered_map = std::unordered_map<K, V, std::hash<K>, std::equal_to<K>,
                                          GlibcAllocator<std::pair<const K, V>>>;
 
 template <typename T> using deque = std::deque<T, GlibcAllocator<T>>;
+
+template <typename T> using vector = std::vector<T, GlibcAllocator<T>>;
 
 using string =
     std::basic_string<char, std::char_traits<char>, GlibcAllocator<char>>;

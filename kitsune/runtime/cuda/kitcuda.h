@@ -400,6 +400,13 @@ extern void __kitcuda_delete_thread_stream(void *opaque_stream);
  */
 extern void __kitcuda_destroy_thread_streams();
 
+/**
+ * Destroy all cached device-side reducer views.
+ */
+extern void __kitcuda_destroy_reducer_cache();
+
+extern void __kitcuda_destroy_mem_chunks();
+
 /*
  * The following global state lives within the runtime to avoid
  * exposing these details into the code generation details. These
