@@ -15,6 +15,7 @@ set(SOURCES
   TapirGPUUtils.cpp
   TapirToTarget.cpp
   TapirLoopInfo.cpp
+  MemOpsReplacement.cpp
 )
 
 if (KITSUNE_CUDA_ENABLED)
