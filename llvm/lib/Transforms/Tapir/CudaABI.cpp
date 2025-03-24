@@ -99,6 +99,7 @@
 #include "llvm/Transforms/Tapir/TapirLoopInfo.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/TapirUtils.h"
+#include "llvm/Transforms/Utils/ValueMapper.h"
 
 using namespace llvm;
 
@@ -472,12 +473,13 @@ CudaLoop::CudaLoop(Module &M, Module &KernelModule, const std::string &KN,
                             Int64Ty,  // device pointer
                             Int64Ty); // number of bytes to copy
 
-  KitCudaMemAllocManagedFn =
-      M.getOrInsertFunction("__kitcuda_mem_alloc_managed",
-                            VoidPtrTy, // return the device pointer
-                            Int64Ty);  // number of bytes to allocate
-  KitCudaMemFreeFn = M.getOrInsertFunction("__kitcuda_mem_free", VoidPtrTy,
-                                           VoidPtrTy); // pointer to free
+  KitCudaMemAllocAndCopyToDevFn = M.getOrInsertFunction(
+      "__kitcuda_mem_alloc_and_copy_to_device", VoidPtrTy, // return the stream
+      VoidPtrTy,                                           // host pointer
+      Int64Ty,      // number of bytes to copy
+      VoidPtrPtrTy, // device pointer
+      VoidPtrTy);   // opaque stream
+
   LLVM_DEBUG(dbgs() << "\t\tdone.\n");
 }
 
@@ -1581,30 +1583,70 @@ void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
   unsigned int i = 0;
   Type *Int64Ty = Type::getInt64Ty(Ctx);
 
-  std::vector<CudaABI::ReducerLaunchInfo> ReducerLaunchInfos;
+  CudaABI::ReducersLaunchInfo LaunchInfo;
+  ValueToValueMapTy DeviceReducerViews;
+
+  if (!ReducerInputs.empty()) {
+    // Allocate temporary host view for reducers used
+    SmallVector<std::pair<const Value *, ReducerOutlineLoopCallInfo>>
+        SortedReducerInputs;
+    for (auto &[V, Info] : ReducerInputs) {
+      SortedReducerInputs.push_back({V, Info});
+    }
+    // Sort the reducer inputs from biggest to smallest
+    std::sort(SortedReducerInputs.begin(), SortedReducerInputs.end(),
+              [](const auto &LHS, const auto &RHS) {
+                return LHS.second.Size > RHS.second.Size;
+              });
+    size_t ViewSize = 0;
+    for (auto &[V, Info] : SortedReducerInputs) {
+      size_t Alignment = bit_ceil(Info.Size);
+      ViewSize = (ViewSize + Alignment - 1) & -Alignment;
+      ViewSize += Info.Size;
+    }
+    LaunchInfo.ViewSize = ViewSize;
+
+    Type *ViewTy = ArrayType::get(Type::getInt8Ty(Ctx), ViewSize);
+    Value *HostViewBasePtr = EntryBuilder.CreateAlloca(ViewTy);
+    LaunchInfo.HostViewBasePtr = HostViewBasePtr;
+    Value *DeviceViewPtrPtr = EntryBuilder.CreateAlloca(VoidPtrTy);
+    LaunchInfo.DeviceViewBasePtrPtr = DeviceViewPtrPtr;
+    CallInst *NewSPtr = NewBuilder.CreateCall(
+        KitCudaMemAllocAndCopyToDevFn,
+        {HostViewBasePtr, ConstantInt::get(Int64Ty, ViewSize), DeviceViewPtrPtr,
+         NewBuilder.CreateLoad(VoidPtrTy, CudaStream)});
+    if (not StreamAssigned) {
+      NewBuilder.CreateStore(NewSPtr, CudaStream);
+      StreamAssigned = true;
+    }
+
+    Value *DeviceViewBasePtr =
+        NewBuilder.CreateLoad(VoidPtrTy, DeviceViewPtrPtr);
+    // Now prepend instructions before __kitcuda_mem_alloc_and_copy_to_dev
+    IRBuilder<> PreCopyBuilder(NewSPtr);
+    ViewSize = 0;
+    for (auto &[V, Info] : SortedReducerInputs) {
+      size_t Alignment = bit_ceil(Info.Size);
+      ViewSize = (ViewSize + Alignment - 1) & -Alignment;
+      Value *HostViewPtr = EntryBuilder.CreateConstInBoundsGEP2_32(
+          ViewTy, HostViewBasePtr, 0, ViewSize);
+      PreCopyBuilder.CreateCall(Info.IdFn, {HostViewPtr});
+      Value *DeviceViewPtr = NewBuilder.CreateConstInBoundsGEP2_32(
+          ViewTy, DeviceViewBasePtr, 0, ViewSize);
+      LaunchInfo.ReducerInfos.push_back({const_cast<Value *>(V), HostViewPtr,
+                                         Info.Size, Info.IdFn, Info.MergeFn});
+      DeviceReducerViews[V] = DeviceViewPtr;
+      ViewSize += Info.Size;
+    }
+  }
 
   for (Value *V : OrderedInputs) {
     Value *RealV = V;
-    if (auto ReducerInput = ReducerInputs.find(V);
-        ReducerInput != ReducerInputs.end()) {
-      const auto &[Size, IdFn, MergeFn] = ReducerInput->second;
-      // For reducer inputs, don't generate prefetch code because reducer views
-      // are allocated by the OpenCilk runtime instead of kitrt.
-      // One fix would be to modify cheetah to allocate using kitrt allocators.
-      // Or, alternatively, the hacky way here is to allocate a temporary view
-      // via kitrt, copy the content to the temporary view. Prefetch that view
-      // to GPU, launch the kernel, and then copy stuff back.
-      LLVM_DEBUG(dbgs() << "\t\t- allocating reducer view for " << *V << "\n");
-      Value *DeviceView = NewBuilder.CreateCall(
-          KitCudaMemAllocManagedFn, {ConstantInt::get(Int64Ty, Size)});
-      Value *DeviceViewPtr = EntryBuilder.CreateAlloca(VoidPtrTy);
-      NewBuilder.CreateStore(DeviceView, DeviceViewPtr);
-      // Now initialize the device view
-      NewBuilder.CreateCall(IdFn, {DeviceView});
-      // Value *HostViewPtr = EntryBuilder.CreateAlloca(VoidPtrTy);
-      // NewBuilder.CreateStore(HostView, HostViewPtr);
-      ReducerLaunchInfos.push_back({V, DeviceViewPtr, Size, IdFn, MergeFn});
-      RealV = DeviceView;
+    bool IsReducer = false;
+    if (auto ReducerInput = DeviceReducerViews.find(V);
+        ReducerInput != DeviceReducerViews.end()) {
+      IsReducer = true;
+      RealV = ReducerInput->second;
     }
 
     Value *VP = EntryBuilder.CreateAlloca(V->getType());
@@ -1615,7 +1657,7 @@ void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
     NewBuilder.CreateStore(VoidVPtr, ArgPtr);
     i++;
 
-    if (CodeGenPrefetch && RealV->getType()->isPointerTy()) {
+    if (!IsReducer && CodeGenPrefetch && RealV->getType()->isPointerTy()) {
       LLVM_DEBUG(dbgs() << "\t\t- code gen prefetch for kernel arg #" << i
                         << "\n");
       Value *VoidPP = NewBuilder.CreateBitCast(RealV, VoidPtrTy);
@@ -1716,7 +1758,9 @@ void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
                     << "\t\t\tcall: " << *LaunchStream << "\n"
                     << "\t\t\tstream: " << *CudaStream << "\n");
   TTarget->registerLaunchStream(LaunchStream, CudaStream);
-  TTarget->registerReducerLaunchInfo(LaunchStream, ReducerLaunchInfos);
+  if (!ReducerInputs.empty()) {
+    TTarget->registerReducerLaunchInfo(LaunchStream, LaunchInfo);
+  }
 
   // Experiment with generating a sync call right here (as opposed to end of
   // sync region)
@@ -2081,38 +2125,33 @@ void CudaABI::finalizeLaunchCalls(Module &M, GlobalVariable *Fatbin) {
                 LLVM_DEBUG(dbgs()
                            << "\t\t\t\t* cuda stream: " << *CudaStream << "\n");
                 CI->setArgOperand(0, CudaStream);
-                std::vector<ReducerLaunchInfo> ReducerLaunchInfos =
-                    getReducerLaunchInfo(SavedLaunchCI);
-                if (!ReducerLaunchInfos.empty()) {
+                if (ReducersLaunchInfo *LaunchInfo =
+                        getReducerLaunchInfo(SavedLaunchCI)) {
                   SyncBuilder.SetInsertPoint(CI->getNextNonDebugInstruction());
-                  FunctionCallee KitCudaMemPrefetchToHostFn =
+                  FunctionCallee KitCudaMemCopyAndFreeFromDevFn =
                       M.getOrInsertFunction(
-                          "__kitcuda_mem_host_prefetch",
-                          VoidPtrTy,  // return the device pointer
-                          VoidPtrTy,  // pointer to prefetch
+                          "__kitcuda_mem_copy_and_free_from_device",
+                          VoidPtrTy,  // return the stream
+                          VoidPtrTy,  // device pointer
+                          Int64Ty,    // number of bytes to copy
+                          VoidPtrTy,  // host pointer
                           VoidPtrTy); // opaque stream
-                  FunctionCallee KitCudaMemFreeFn =
-                      M.getOrInsertFunction("__kitcuda_mem_free",
-                                            VoidTy,     // returns
-                                            VoidPtrTy); // pointer to free
-                  for (auto [Ptr, DeviceViewPtr, _Size, _IdFn, _MergeFn] :
-                       ReducerLaunchInfos) {
-                    Value *DeviceView = SyncBuilder.CreateLoad(
-                        VoidPtrTy, DeviceViewPtr, "device_view");
-                    SyncBuilder.CreateCall(KitCudaMemPrefetchToHostFn,
-                                           {DeviceView, CudaStream});
-                  }
-                  for (auto [Ptr, DeviceViewPtr, Size, IdFn, MergeFn] :
-                       ReducerLaunchInfos) {
-                    Value *DeviceView = SyncBuilder.CreateLoad(
-                        VoidPtrTy, DeviceViewPtr, "device_view");
+                  Value *DeviceViewBasePtr = SyncBuilder.CreateLoad(
+                      VoidPtrTy, LaunchInfo->DeviceViewBasePtrPtr,
+                      "device_view_base");
+                  SyncBuilder.CreateCall(
+                      KitCudaMemCopyAndFreeFromDevFn,
+                      {LaunchInfo->HostViewBasePtr,
+                       ConstantInt::get(Int64Ty, LaunchInfo->ViewSize),
+                       DeviceViewBasePtr, CudaStream});
+                  for (auto [Ptr, HostViewPtr, Size, IdFn, MergeFn] :
+                       LaunchInfo->ReducerInfos) {
                     // Generate a lookup call to get the current view of the
                     // reducer.
                     Value *HostView = SyncBuilder.CreateIntrinsic(
                         Intrinsic::hyper_lookup, {Int64Ty},
                         {Ptr, ConstantInt::get(Int64Ty, Size), IdFn, MergeFn});
-                    SyncBuilder.CreateCall(MergeFn, {HostView, DeviceView});
-                    SyncBuilder.CreateCall(KitCudaMemFreeFn, {DeviceView});
+                    SyncBuilder.CreateCall(MergeFn, {HostView, HostViewPtr});
                   }
                 }
 

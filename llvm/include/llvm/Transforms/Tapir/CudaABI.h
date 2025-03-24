@@ -138,23 +138,29 @@ public:
 
   struct ReducerLaunchInfo {
     Value *Ptr;
-    Value *DeviceViewPtr;
+    Value *HostViewPtr;
     size_t Size;
     Function *IdFn;
     Function *MergeFn;
   };
 
-  void registerReducerLaunchInfo(CallInst *CI,
-                                 std::vector<ReducerLaunchInfo> &Infos) {
+  struct ReducersLaunchInfo {
+    Value *HostViewBasePtr;
+    Value *DeviceViewBasePtrPtr;
+    size_t ViewSize;
+    llvm::SmallVector<ReducerLaunchInfo, 4> ReducerInfos;
+  };
+
+  void registerReducerLaunchInfo(CallInst *CI, ReducersLaunchInfo &Infos) {
     ReducerLaunchInfoMap[CI] = Infos;
   }
 
-  std::vector<ReducerLaunchInfo> getReducerLaunchInfo(CallInst *CI) {
+  ReducersLaunchInfo *getReducerLaunchInfo(CallInst *CI) {
     if (const auto It = ReducerLaunchInfoMap.find(CI);
         It != ReducerLaunchInfoMap.end()) {
-      return It->second;
+      return &It->second;
     }
-    return {};
+    return nullptr;
   }
 
   private:
@@ -181,7 +187,7 @@ public:
     typedef llvm::DenseMap<CallInst*,AllocaInst*>  LaunchToStreamMapTy;
     LaunchToStreamMapTy   KernelLaunchToStreamMap;
 
-    DenseMap<CallInst *, std::vector<ReducerLaunchInfo>> ReducerLaunchInfoMap;
+    DenseMap<CallInst *, ReducersLaunchInfo> ReducerLaunchInfoMap;
 
     Module   KernelModule;
     TargetMachine *PTXTargetMachine;
@@ -245,8 +251,7 @@ private:
   FunctionCallee KitCudaMemcpySymbolToDeviceFn = nullptr;
 
   // Added to support OpenCilk reducers.
-  FunctionCallee KitCudaMemAllocManagedFn = nullptr;
-  FunctionCallee KitCudaMemFreeFn = nullptr;
+  FunctionCallee KitCudaMemAllocAndCopyToDevFn = nullptr;
 
   SmallVector<Value *, 5> OrderedInputs;
 
