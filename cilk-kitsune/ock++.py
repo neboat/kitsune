@@ -182,7 +182,7 @@ class Invocation:
                 sys.exit(0)
             elif arg == "--version":
                 # Just run clang++ --version
-                _run_command(
+                ret._run_command(
                     [f"{ret.cilk_path}/bin/clang++", "--version"],
                     "OpenCilk compiler version",
                 )
@@ -269,7 +269,7 @@ class Invocation:
     def generate_llvm_ir(self) -> None:
         """Generate LLVM IR using OpenCilk's clang++."""
 
-        _run_command(
+        self._run_command(
             [
                 f"{self.cilk_path}/bin/{self.cc}",
                 self.input_file,
@@ -313,20 +313,20 @@ class Invocation:
 
         debug_flags = [
             "--debug-only=cuabi",
-            "--debug-abi-calls",
             "--verify-each",
             "--cuabi-keep-files",
             "--pass-remarks-analysis=loop-spawning",
         ]
 
-        _run_command(
+        self._run_command(
             [
                 f"{self.kitsune_path}/bin/opt",
-                f"-passes=tapir-lowering<O{self.opt_level}>",
+                f"-passes=tapir-lowering<O{self.opt_level}>,tapir-memops-replacement",
                 # These flags are for lowering to OpenCilk
                 "--tapir-target=opencilk",
                 "--use-opencilk-runtime-bc",
                 f"--opencilk-runtime-bc-path={self.kitsune_path}/lib/clang/19/lib/x86_64-unknown-linux-gnu/libopencilk-abi.bc",
+                # *debug_flags,
                 "-S",
                 self.llvm_ir_output_file,
                 "-o",
@@ -398,7 +398,7 @@ class Invocation:
         kitrt_dir = f"{self.kitsune_path}/tools/kitsune/kitrt/lib/clang/19/lib"
         opencilk_dir = f"{self.kitsune_path}/lib/clang/19/lib/x86_64-unknown-linux-gnu"
 
-        _run_command(
+        self._run_command(
             [
                 f"{self.kitsune_path}/bin/kit++",
                 *input_files,
@@ -435,7 +435,7 @@ class Invocation:
             idx += 1
         assert output_file is not None
 
-        _run_command(
+        self._run_command(
             [
                 f"{self.kitsune_path}/bin/kitcc",
                 f"-O{self.opt_level}",
@@ -524,50 +524,51 @@ class Invocation:
             assert self.object_files, "No input files specified"
             self.compile_executable()
 
+    def _run_command(
+        self,
+        command: list[str | Path],
+        description: str,
+        cwd: Path | None = None,
+        print_cmd: bool = False,
+    ) -> subprocess.CompletedProcess:
+        """Run a shell command and handle errors."""
+        command_str = " ".join(str(c) for c in command)
+        if print_cmd:
+            pass
+            # print(command_str)
+            # print()
+        logging.debug(f"Running command for: {command_str}")
+        if cwd:
+            logging.debug(f"Working directory: {cwd}")
 
-def _run_command(
-    command: list[str | Path],
-    description: str,
-    cwd: Path | None = None,
-    print_cmd: bool = False,
-) -> subprocess.CompletedProcess:
-    """Run a shell command and handle errors."""
-    command_str = " ".join(str(c) for c in command)
-    if print_cmd:
-        pass
-        # print(command_str)
-        # print()
-    logging.debug(f"Running command for: {command_str}")
-    if cwd:
-        logging.debug(f"Working directory: {cwd}")
-
-    try:
-        result = subprocess.run(
-            command,
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            cwd=cwd,
-        )
-        skip_line = 0
-        for line in result.stdout.decode("utf-8").split("\n"):
-            skip_line = max(0, skip_line - 1)
-            line = line.rstrip()
-            if "warning: inconsistent use of MD5 checksums" in line:
-                # This is a spurious warning from clang which we can safely ignore.
-                skip_line = 3  # Skip next three lines
-            if skip_line > 0:
-                continue
-            if line:
-                print(line)
-        logging.info(description)
-        return result
-    except subprocess.CalledProcessError as e:
-        logging.error(f"{description} failed")
-        logging.error(f"Command: {command_str}")
-        logging.error(f"Return code: {e.returncode}")
-        logging.error(f"Output: {e.stdout.decode('utf-8')}")
-        sys.exit(1)
+        try:
+            result = subprocess.run(
+                command,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                cwd=cwd,
+            )
+            skip_line = 0
+            for line in result.stdout.decode("utf-8").split("\n"):
+                skip_line = max(0, skip_line - 1)
+                line = line.rstrip()
+                if "warning: inconsistent use of MD5 checksums" in line:
+                    # This is a spurious warning from clang which we can safely ignore.
+                    skip_line = 3  # Skip next three lines
+                if skip_line > 0:
+                    continue
+                if line:
+                    print(line)
+            logging.info(description)
+            return result
+        except subprocess.CalledProcessError as e:
+            logging.error(f"{description} failed")
+            logging.error(f"Command: {command_str}")
+            logging.error(f"Return code: {e.returncode}")
+            logging.error(f"Output: {e.stdout.decode('utf-8')}")
+            atexit.unregister(self.temp_dir_cleanup)
+            sys.exit(1)
 
 
 if __name__ == "__main__":
