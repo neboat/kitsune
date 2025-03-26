@@ -308,5 +308,22 @@ using string =
 
 } // namespace kitrt
 
+#ifdef __GLIBCXX__
+#if __GLIBCXX__ < 20230426 // 13.1.0
+// LWG 3705: hashability of basic_string should not depend on allocator.
+// This defect report was only fixed in GCC 13.1. See
+// https://github.com/gcc-mirror/gcc/commit/b370ed0bf93ecf0ff51d29e7fc132c433b2aa1be
+// So for older versions, we need to provide our own specialization.
+namespace std {
+template <> struct hash<kitrt::string> {
+  size_t operator()(const kitrt::string &str) const {
+    return std::hash<std::string_view>()(
+        std::string_view(str.data(), str.size()));
+  }
+};
+} // namespace std
+#endif
+#endif
+
 #endif // __KITRT_H__
 
