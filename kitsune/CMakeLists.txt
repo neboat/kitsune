@@ -333,7 +333,8 @@ if (KITSUNE_OPENCILK_ENABLED)
     GIT_TAG        dev
     SOURCE_DIR     ${KITSUNE_CHEETAH_SOURCE_DIR}
     BINARY_DIR     ${KITSUNE_CHEETAH_BINARY_DIR}
-    CMAKE_ARGS     ${KITSUNE_CHEETAH_BUILD_CMAKE_FLAGS})
+    CMAKE_ARGS     ${KITSUNE_CHEETAH_BUILD_CMAKE_FLAGS}
+    UPDATE_COMMAND "")
 
   # Copy the cheetah files into a "staging" area. This allows kitsune to be
   # run from the build directory. The destination directory is set to
