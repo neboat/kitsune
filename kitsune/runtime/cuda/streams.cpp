@@ -164,6 +164,8 @@ void __kitcuda_sync_thread_stream(void *opaque_stream) {
   assert(opaque_stream != nullptr && "unexpected null stream pointer!");
   KIT_NVTX_PUSH("kitcuda:sync_thread_stream", KIT_NVTX_STREAM);
   CUstream stream = (CUstream)opaque_stream;
+  if (__kitrt_verbose_mode())
+    fprintf(stderr, "kitcuda: synchronizing stream: %p.\n", (void *)stream);
   CU_SAFE_CALL(cuStreamSynchronize_p(stream));
   KIT_NVTX_POP();
 }
