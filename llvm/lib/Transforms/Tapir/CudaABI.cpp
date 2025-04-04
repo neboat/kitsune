@@ -93,6 +93,7 @@
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/IPO/AlwaysInliner.h"
 #include "llvm/Transforms/IPO/Inliner.h"
+#include "llvm/Transforms/IPO/StripSymbols.h"
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/Scalar/GVN.h"
 #include "llvm/Transforms/Tapir/Outline.h"
@@ -338,6 +339,7 @@ std::string PTXVersionFromCudaVersion() {
           .Case("12.3", "+ptx83")
           .Case("12.4", "+ptx83")
           .Case("12.5", "+ptx83")
+          .Case("12.6", "+ptx83")
           .Case("12.8", "+ptx83")
           .Case("12.9", "+ptx83")
           .Default("");
@@ -893,7 +895,7 @@ void CudaLoop::postProcessOutline(TapirLoopInfo &TLI, TaskOutlineInfo &Out,
 
   fixReducersInKernel(KernelF, ThreadIdx, BlockDim, VMap);
   fixScannersInKernel(KernelF, End, VMap);
-  fixDebugInfoInKernel(KernelF);
+  // fixDebugInfoInKernel(KernelF);
 
   if (KeepIntermediateFiles) {
     std::error_code EC;
@@ -2267,23 +2269,22 @@ bool CudaABI::preProcessFunction(Function &F, TaskInfo &TI,
 
 void CudaABI::postProcessFunction(Function &F, bool OutliningTapirLoops) {
   if (OutliningTapirLoops) {
-    // LLVM_DEBUG(dbgs() << "cuabi: post-processing function '" << F.getName()
-    //                   << "'\n");
-    // LLVMContext &Ctx = M.getContext();
-    // Type *VoidTy = Type::getVoidTy(Ctx);
-    // FunctionCallee KitCudaSyncFn =
-    //     M.getOrInsertFunction("__kitcuda_sync_current_stream", VoidTy);
-    // for (Value *SR : SyncRegList) {
-    //   for (Use &U : SR->uses()) {
-    //     if (auto *SyncI = dyn_cast<SyncInst>(U.getUser())) {
-    //       CallInst::Create(KitCudaSyncFn, {}, "",
-    //                        &*SyncI->getSuccessor(0)->begin());
-    //       LLVM_DEBUG(dbgs() << "  cuabi: inserting sync call for sync region:
-    //       "
-    //                         << *SyncI << "\n");
-    //     }
-    //   }
-    // }
+    LLVMContext &Ctx = M.getContext();
+    Type *VoidTy = Type::getVoidTy(Ctx);
+    PointerType *VoidPtrTy = PointerType::getUnqual(Ctx);
+    Value *CudaStream = ConstantPointerNull::get(VoidPtrTy);
+    FunctionCallee KitCudaSyncFn = M.getOrInsertFunction(
+        "__kitcuda_sync_thread_stream", VoidTy, VoidPtrTy);
+
+    for (Value *SR : SyncRegList) {
+      for (Use &U : SR->uses()) {
+        if (auto *SyncI = dyn_cast<SyncInst>(U.getUser()))
+          // Insert right before the sync, to avoid problems where the successor
+          // of the sync has other predecessors.
+          CallInst::Create(KitCudaSyncFn, {CudaStream}, "",
+                           SyncI);
+      }
+    }
     SyncRegList.clear();
   }
 }
@@ -2354,15 +2355,19 @@ CudaABIOutputFile CudaABI::assemblePTXFile(CudaABIOutputFile &PTXFile) {
   switch (OptLevel) {
   case 0:
     PTXASArgList.push_back("0");
+    PTXASArgList.push_back("--device-debug");
     break;
   case 1:
     PTXASArgList.push_back("1");
+    PTXASArgList.push_back("--generate-line-info");
     break;
   case 2:
     PTXASArgList.push_back("2");
+    PTXASArgList.push_back("--generate-line-info");
     break;
   case 3:
     PTXASArgList.push_back("3");
+    PTXASArgList.push_back("--generate-line-info");
     // PTXASArgList.push_back("--extensible-whole-program");
     break;
   default:
@@ -3077,6 +3082,9 @@ CudaABIOutputFile CudaABI::generatePTX() {
 
   KernelModule.setModuleFlag(llvm::Module::Override, "nvvm-reflect-ftz", true);
   if (OptLevel > 0) {
+    // TODO: ptxas is very limited in its ability to generate optimized debug info.
+    // For now, strip the debug info when using optimization.
+    StripDebugInfo(KernelModule);
     if (OptLevel > 3)
       OptLevel = 3;
     LLVM_DEBUG(dbgs() << "\t- running kernel module optimization passes...\n");
@@ -3299,7 +3307,7 @@ CudaABI::getLoopOutlineProcessor(const TapirLoopInfo *TL) {
     // ModuleName could contain dot which is invalid PTX identifier, so clean it
     // up first.
     KernelName = CUABI_KERNEL_NAME_PREFIX + cleanUpName(ModuleName) + "_" +
-                 Twine(LineNumber).str();
+                 KernelName + "_" + Twine(LineNumber).str();
   } else {
     // SmallString<255> ModName(Twine(ModuleName).str());
     // sys::path::replace_extension(ModName, "");
