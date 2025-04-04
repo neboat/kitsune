@@ -64,10 +64,11 @@ void llvm::CloneIntoFunction(Function *NewFunc, const Function *OldFunc,
                              ValueToValueMapTy &VMap,
                              CloneFunctionChangeType Changes,
                              SmallVectorImpl<ReturnInst *> &Returns,
-                             const StringRef NameSuffix,
+                             const StringRef NameSuffix, std::optional<DebugInfoFinder> &DIFinder,
                              SmallPtrSetImpl<BasicBlock *> *ReattachBlocks,
                              SmallPtrSetImpl<BasicBlock *> *TaskResumeBlocks,
                              SmallPtrSetImpl<BasicBlock *> *SharedEHEntries,
+                             DISubprogram *SPClonedWithinModule,
                              ClonedCodeInfo *CodeInfo,
                              ValueMapTypeRemapper *TypeMapper,
                              OutlineMaterializer *Materializer) {
@@ -101,40 +102,6 @@ void llvm::CloneIntoFunction(Function *NewFunc, const Function *OldFunc,
       for (BasicBlock *Pred : predecessors(EHEntry))
         EHEntryPreds.insert(Pred);
 
-  // When we remap instructions within the same module, we want to avoid
-  // duplicating inlined DISubprograms, so record all subprograms we find as we
-  // duplicate instructions and then freeze them in the MD map. We also record
-  // information about dbg.value and dbg.declare to avoid duplicating the
-  // types.
-  std::optional<DebugInfoFinder> DIFinder;
-
-  // Track the subprogram attachment that needs to be cloned to fine-tune the
-  // mapping within the same module.
-  DISubprogram *SPClonedWithinModule = nullptr;
-  if (Changes < CloneFunctionChangeType::DifferentModule) {
-    assert((NewFunc->getParent() == nullptr ||
-            NewFunc->getParent() == OldFunc->getParent()) &&
-           "Expected NewFunc to have the same parent, or no parent");
-
-    // Need to find subprograms, types, and compile units.
-    DIFinder.emplace();
-
-    SPClonedWithinModule = OldFunc->getSubprogram();
-    if (SPClonedWithinModule)
-      DIFinder->processSubprogram(SPClonedWithinModule);
-  } else {
-    assert((NewFunc->getParent() == nullptr ||
-            NewFunc->getParent() != OldFunc->getParent()) &&
-           "Expected NewFunc to have different parents, or no parent");
-
-    if (Changes == CloneFunctionChangeType::DifferentModule) {
-      assert(NewFunc->getParent() &&
-             "Need parent of new function to maintain debug info invariants");
-
-      // Need to find all the compile units.
-      DIFinder.emplace();
-    }
-  }
 
   // Loop over all of the basic blocks in the function, cloning them as
   // appropriate.  Note that we save BE this way in order to handle cloning of
@@ -320,6 +287,8 @@ void llvm::CloneIntoFunction(Function *NewFunc, const Function *OldFunc,
       for (Instruction &II : *BB) {
         LLVM_DEBUG(dbgs() << "  Remapping " << II << "\n");
         RemapInstruction(&II, VMap, RemapFlag, TypeMapper, Materializer);
+        RemapDbgRecordRange(II.getModule(), II.getDbgRecordRange(), VMap,
+                            RemapFlag, TypeMapper, Materializer);
       }
     }
   } // end timed region
@@ -528,21 +497,39 @@ Function *llvm::CreateHelper(
     }
   }
 
-  // Clone the metadata from the old function into the new.
-  bool MustCloneSP = OldFunc->getParent() && OldFunc->getParent() == DestM;
-  DISubprogram *SP = OldFunc->getSubprogram();
-  if (SP) {
-    assert(!MustCloneSP || ModuleLevelChanges);
-    // Add mappings for some DebugInfo nodes that we don't want duplicated
-    // even if they're distinct.
-    auto &MD = VMap.MD();
-    MD[SP->getUnit()].reset(SP->getUnit());
-    MD[SP->getType()].reset(SP->getType());
-    MD[SP->getFile()].reset(SP->getFile());
-    // If we're not cloning into the same module, no need to clone the
-    // subprogram
-    if (!MustCloneSP)
-      MD[SP].reset(SP);
+  // When we remap instructions within the same module, we want to avoid
+  // duplicating inlined DISubprograms, so record all subprograms we find as we
+  // duplicate instructions and then freeze them in the MD map. We also record
+  // information about dbg.value and dbg.declare to avoid duplicating the
+  // types.
+  std::optional<DebugInfoFinder> DIFinder;
+
+  // Track the subprogram attachment that needs to be cloned to fine-tune the
+  // mapping within the same module.
+  DISubprogram *SPClonedWithinModule = nullptr;
+  if (Changes < CloneFunctionChangeType::DifferentModule) {
+    assert((NewFunc->getParent() == nullptr ||
+            NewFunc->getParent() == OldFunc->getParent()) &&
+           "Expected NewFunc to have the same parent, or no parent");
+
+    // Need to find subprograms, types, and compile units.
+    DIFinder.emplace();
+
+    SPClonedWithinModule = OldFunc->getSubprogram();
+    if (SPClonedWithinModule)
+      DIFinder->processSubprogram(SPClonedWithinModule);
+  } else {
+    assert((NewFunc->getParent() == nullptr ||
+            NewFunc->getParent() != OldFunc->getParent()) &&
+           "Expected NewFunc to have different parents, or no parent");
+
+    if (Changes == CloneFunctionChangeType::DifferentModule) {
+      assert(NewFunc->getParent() &&
+             "Need parent of new function to maintain debug info invariants");
+
+      // Need to find all the compile units.
+      DIFinder.emplace();
+    }
   }
 
   // If the outlined function has pointer arguments its memory effects are
@@ -590,8 +577,8 @@ Function *llvm::CreateHelper(
 
   // Clone Blocks into the new function.
   CloneIntoFunction(NewFunc, OldFunc, Blocks, VMap, Changes, Returns,
-                    NameSuffix, ReattachBlocks, DetachRethrowBlocks,
-                    SharedEHEntries, CodeInfo, TypeMapper, Materializer);
+                    NameSuffix, DIFinder, ReattachBlocks, DetachRethrowBlocks,
+                    SharedEHEntries, SPClonedWithinModule, CodeInfo, TypeMapper, Materializer);
 
   // Add a branch in the new function to the cloned Header.
   BasicBlock *ClonedHeader = cast<BasicBlock>(VMap[Header]);
