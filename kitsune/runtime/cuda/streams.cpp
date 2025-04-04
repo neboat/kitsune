@@ -102,6 +102,8 @@ void __kitcuda_sync_thread_stream(void *opaque_stream) {
   assert(opaque_stream != nullptr && "unexpected null stream pointer!");
   KIT_NVTX_PUSH("kitcuda:sync_thread_stream", KIT_NVTX_STREAM);
   CUstream stream = (CUstream)opaque_stream;
+  if (__kitrt_verbose_mode())
+    fprintf(stderr, "kitcuda: synchronizing stream: %p.\n", (void *)stream);
   CU_SAFE_CALL(cuStreamSynchronize_p(stream));
   // In our current use case a synchronized stream is done doing
   // any useful work.  Recycle it for later use... 
@@ -135,6 +137,8 @@ void __kitcuda_delete_thread_stream(void *opaque_stream) {
   if (sit != _kitcuda_streams.end()) {
     _kitcuda_streams.erase(sit);
   }
+  if (__kitrt_verbose_mode())
+    fprintf(stderr, "kitcuda: delete_thread_stream: deleting stream: %p.\n", (void *)stream);
   CU_SAFE_CALL(cuStreamDestroy_v2_p(stream));
   _kitcuda_stream_mutex.unlock();
   KIT_NVTX_POP();
@@ -144,8 +148,11 @@ void __kitcuda_destroy_thread_streams() {
   KIT_NVTX_PUSH("kitrt:delete_thread_streams", KIT_NVTX_STREAM);
   _kitcuda_stream_mutex.lock();
  
-  for (auto &entry : _kitcuda_streams)
+  for (auto &entry : _kitcuda_streams) {
+    if (__kitrt_verbose_mode())
+      fprintf(stderr, "kitcuda: destroy_thread_streams: deleting stream: %p.\n", (void *)entry);
     CU_SAFE_CALL(cuStreamDestroy_v2_p(entry));
+  }
   _kitcuda_streams.clear();
   _kitcuda_stream_mutex.unlock();
   KIT_NVTX_POP();

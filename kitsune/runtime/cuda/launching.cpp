@@ -381,12 +381,13 @@ void *__kitcuda_launch_kernel(const void *fat_bin, const char *kernel_name,
     cu_stream = (CUstream)__kitcuda_get_thread_stream();
     if (__kitrt_verbose_mode())
       fprintf(stderr,
-              "kitcuda: launch stream is null, requested a new stream.\n");
+              "kitcuda: launch stream is null, requested a new stream: %p.\n",
+              (void *)cu_stream);
   } else {
     // use the provided stream for this launch...
     cu_stream = (CUstream)opaque_stream;
     if (__kitrt_verbose_mode())
-      fprintf(stderr, "kitcuda: launch stream is non-null.\n");
+      fprintf(stderr, "kitcuda: launch stream is non-null: %p\n", (void *)cu_stream);
   }
 
   CU_SAFE_CALL(cuLaunchKernel_p(cu_func, blks_per_grid, 1, 1,

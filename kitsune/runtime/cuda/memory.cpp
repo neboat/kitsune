@@ -391,6 +391,9 @@ void *__kitcuda_mem_gpu_prefetch(void *vp, void *opaque_stream) {
       else
         cu_stream = (CUstream)__kitcuda_get_thread_stream();
 
+      if (__kitrt_verbose_mode())
+        fprintf(stderr, "kitrt: prefetching memory at %p, size %ld, stream %p.\n",
+	              vp, size, cu_stream);
       CU_SAFE_CALL(cuMemPrefetchAsync_p((CUdeviceptr)vp, size, _kitcuda_device,
                                         cu_stream));
       __kitrt_mark_mem_prefetched(vp);
