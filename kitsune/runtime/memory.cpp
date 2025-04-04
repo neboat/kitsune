@@ -69,3 +69,12 @@ void __kitrt_default_mem_free(void *ptr) {
   free(ptr);  
 }
 
+extern "C" __attribute__((malloc))
+void* __kitrt_default_mem_realloc(void *ptr, size_t bytes) {
+  bool ro, wo;
+  if (__kitrt_get_mem_alloc_size(ptr, &ro, &wo) > 0)
+    __kitrt_unregister_mem_alloc(ptr);
+  ptr = realloc(ptr, bytes);
+  __kitrt_register_mem_alloc(ptr, bytes);
+  return ptr;
+}
