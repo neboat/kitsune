@@ -126,81 +126,77 @@ bool CodeGenFunction::ParseAndValidateParallelFor(
   //   lambda_expr...);
 
   unsigned int curArgIndex = 0;
-  const Expr *SE =
-      SimplifyExpr(CE->getArg(curArgIndex)); // Simplified expression.
+  const Expr *SE = SimplifyExpr(CE->getArg(curArgIndex));
 
   // Parse a 'named' construct. We will capture the name, but don't do
   // anything with it. NOTE: we assume this only comes in the form of a string
   // literal. This is ridiculously fragile. Only parses string literals as the
   // first argument e.g. parallel_for("name",...). It will not parse variables
   // e.g. parallel_for(name,...)
-  if (auto *CXXCE = dyn_cast<CXXConstructExpr>(SE))
+  if (auto *CXXCE = dyn_cast<CXXConstructExpr>(SE)) {
     if (auto *NameExpr =
             dyn_cast<StringLiteral>(CXXCE->getArg(0)->IgnoreImplicit())) {
       CN = NameExpr->getString().str();
       SE = SimplifyExpr(CE->getArg(++curArgIndex));
-      ;
-    };
+    }
+  }
 
   // Parse a vector of IV bounds, can be either an *Expr or an MDRangePolicy
   SmallVector<std::pair<const Expr *, const Expr *>, 6> BoundsList;
 
   const CXXTemporaryObjectExpr *CXXTO = dyn_cast<CXXTemporaryObjectExpr>(SE);
-  if (CXXTO &&
-      CXXTO->getBestDynamicClassType()->getNameAsString() == "MDRangePolicy") {
+  const CXXRecordDecl *CXXClass =
+      CXXTO ? CXXTO->getBestDynamicClassType() : nullptr;
+  if (CXXClass && CXXClass->getNameAsString() == "MDRangePolicy") {
     // The first non-name argument is an MDRangePolicy, extract both lower and
     // upper bounds for multiple induction variables
 
     // extract the initializer lists of lower and upper bounds
-    const InitListExpr *LowerBounds =
+    const auto *LowerBounds =
         dyn_cast<InitListExpr>(CXXTO->getArg(0)->IgnoreImplicit());
-    const InitListExpr *UpperBounds =
+    const auto *UpperBounds =
         dyn_cast<InitListExpr>(CXXTO->getArg(1)->IgnoreImplicit());
 
-    // zip the bounds
-    for (unsigned int i = 0; i < LowerBounds->getNumInits(); i++)
-      BoundsList.push_back(std::pair<const Expr *, const Expr *>(
-          LowerBounds->getInit(i)->IgnoreImplicit(),
-          UpperBounds->getInit(i)->IgnoreImplicit()));
+    for (size_t i = 0; i < LowerBounds->getNumInits(); i++)
+      BoundsList.emplace_back(LowerBounds->getInit(i)->IgnoreImplicit(),
+                              UpperBounds->getInit(i)->IgnoreImplicit());
+  } else if (CXXClass && CXXClass->getNameAsString() == "RangePolicy") {
+    // A RangePolicy is 1D, so there should only be a start and an end and both
+    // can be assumed to have Scalar type.
+    const Expr *LowerBound = CXXTO->getArg(0)->IgnoreImplicit();
+    const Expr *UpperBound = CXXTO->getArg(1)->IgnoreImplicit();
+    BoundsList.emplace_back(LowerBound, UpperBound);
+  } else if (SE->getType()->isScalarType()) {
+    // If neither a RangePolicy, nor an MDRangePolicy was found, this should be
+    // an upper bound for a single induction variable. Per this documentation:
+    //
+    //   https://kokkos.org/kokkos-core-wiki/API/core/policies/RangePolicy.html#examples
+    //
+    // this should be equivalent to Kokkos::RangePolicy<>(0, N). This should
+    // always be a scalar type. If that is a bad assumption, expect this code to
+    // crash in some mysterious way.
+    BoundsList.emplace_back(nullptr, CE->getArg(curArgIndex));
   } else {
-
-    // No MDRangePolicy, in which case, this is an upper bound for a single
-    // IVInfo Rather than try and parse, we will just assume this is a valid
-    // expression as there are just too many ways to use or get in trouble.
-    // Note we use the full expression for the upper bound, not the simplified
-    // expression
-    BoundsList.push_back(std::pair<const Expr *, const Expr *>(
-        nullptr, CE->getArg(curArgIndex)));
+    // FIXME: Create an error and emit that.
+    llvm_unreachable("CodeGenFunction::ParseAndValidateParallelFor: Range "
+                     "argument with non-scalar type in Kokkos::parallel_for");
+    return false;
   };
 
-  // Move to the next argument of the parallel_for, which should be the lambda
-  SE = SimplifyExpr(CE->getArg(++curArgIndex));
-
-  // Parse the lambda expression in the parallel_for
-  LE = dyn_cast<LambdaExpr>(SE);
-
-  // Extract the ParmVarDecl's from the lambda
-  ArrayRef<ParmVarDecl *> Params{LE->getCallOperator()->parameters()};
-
-  // Perform semantic analysis of the derived constructs
-
-  // Check the bounds expression
-  // if (IVInfos == nullptr) {
-  //   // We didn't get a known bounds expression back -- this is most likely
-  //   // due to some type of expression that we have yet to deal with.  We're
-  //   // going to have to uncover these on a case-by-cases basis.
-  //   Diags.Report(CE->getExprLoc(), diag::warn_kokkos_unknown_bounds_expr);
-  //   return false;
-  // }
-
-  // Check the lambda expression is at least well formed
-  if (LE == nullptr) {
+  // Parse the lambda expression in the parallel_for.
+  // Can we assume that this is always a lambda expression? If this has already
+  // passed Sema, should a non-lambda in this position have been caught already?
+  LE = dyn_cast<LambdaExpr>(SimplifyExpr(CE->getArg(++curArgIndex)));
+  if (!LE) {
     // The parallel_for doesn't have a (recognizable) lambda expression.
     Diags.Report(CE->getExprLoc(), diag::warn_kokkos_no_functor);
     return false;
   }
 
-  // Maker sure the lambda has defined arguments
+  // Extract the ParmVarDecl's from the lambda
+  ArrayRef<ParmVarDecl *> Params{LE->getCallOperator()->parameters()};
+
+  // Make sure the lambda has defined arguments
   if (LE->getCallOperator()->getNumParams() == 0) {
     // The lambda has no arguments, and gets all variables by capture
     Diags.Report(CE->getExprLoc(), diag::warn_kokkos_no_functor_args);
@@ -323,7 +319,7 @@ bool CodeGenFunction::EmitKokkosParallelFor(
   DiagnosticsEngine &Diags = CGM.getDiags();
   if (!ParseAndValidateParallelFor(CE, PFName, IVInfos, Lambda, Diags)) {
     llvm::dbgs() << "  warning: unrecognized kokkos::parallel_for...\n";
-    return true;
+    return false;
   }
   const unsigned int numIVs = IVInfos.size();
 
@@ -402,7 +398,7 @@ bool CodeGenFunction::EmitKokkosParallelFor(
   // Emit the detach block for parallel execution along with its Tapir
   // terminator. This is where we capture the induction variable by value and
   // store it on the stack of the calling thread.
-
+  getNormalCleanupDestSlot();
   EmitBlock(Detach);
 
   // Create threadsafe induction variables before the detach and put them in
@@ -479,6 +475,7 @@ bool CodeGenFunction::EmitKokkosParallelFor(
   // Emit the Sync block and terminator
   EmitBlock(Sync.getBlock());
   Builder.CreateSync(LoopExit.getBlock(), SRStart);
+  PopSyncRegion();
 
   // Emit the fall-through block.
   EmitBlock(LoopExit.getBlock(), true);
