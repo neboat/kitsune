@@ -2148,26 +2148,7 @@ PreservedAnalyses IndVarSimplifyPass::run(Loop &L, LoopAnalysisManager &AM,
 
   IndVarSimplify IVS(&AR.LI, &AR.SE, &AR.DT, DL, &AR.TLI, &AR.TTI, AR.MSSA,
                      &AR.TI, WidenIndVars && AllowIVWidening,
-                     /*TapirLoopsOnly=*/false);
-  if (!IVS.run(&L))
-    return PreservedAnalyses::all();
-
-  auto PA = getLoopPassPreservedAnalyses();
-  PA.preserveSet<CFGAnalyses>();
-  if (AR.MSSA)
-    PA.preserve<MemorySSAAnalysis>();
-  return PA;
-}
-
-PreservedAnalyses TapirIndVarSimplifyPass::run(Loop &L, LoopAnalysisManager &AM,
-                                               LoopStandardAnalysisResults &AR,
-                                               LPMUpdater &) {
-  Function *F = L.getHeader()->getParent();
-  const DataLayout &DL = F->getParent()->getDataLayout();
-
-  IndVarSimplify IVS(&AR.LI, &AR.SE, &AR.DT, DL, &AR.TLI, &AR.TTI, AR.MSSA,
-                     &AR.TI, WidenIndVars && AllowIVWidening,
-                     /*TapirLoopsOnly=*/true);
+                     TapirLoopsOnly);
   if (!IVS.run(&L))
     return PreservedAnalyses::all();
 

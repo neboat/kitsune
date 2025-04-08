@@ -1511,7 +1511,8 @@ PassBuilder::buildModuleOptimizationPipeline(OptimizationLevel Level,
   if (PTO.LoopStripmine && Level != OptimizationLevel::O1 &&
       !Level.isOptimizingForSize()) {
     LoopPassManager LPM1, LPM2;
-    LPM1.addPass(TapirIndVarSimplifyPass());
+    LPM1.addPass(
+        IndVarSimplifyPass(/*WidenIndVars=*/true, /*TapirLoopsOnly=*/true));
     OptimizePM.addPass(
         createFunctionToLoopPassAdaptor(std::move(LPM1),
                                         /*UseMemorySSA=*/true,
