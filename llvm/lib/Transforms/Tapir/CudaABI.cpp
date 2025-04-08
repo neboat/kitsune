@@ -1767,10 +1767,10 @@ void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
 
   // Experiment with generating a sync call right here (as opposed to end of
   // sync region)
-  Type *VoidTy = Type::getVoidTy(Ctx);
-  FunctionCallee KitCudaSyncFn =
-      M.getOrInsertFunction("__kitcuda_sync_thread_stream", VoidTy, VoidPtrTy);
-  NewBuilder.CreateCall(KitCudaSyncFn, {LaunchStream});
+  // Type *VoidTy = Type::getVoidTy(Ctx);
+  // FunctionCallee KitCudaSyncFn =
+  //     M.getOrInsertFunction("__kitcuda_sync_thread_stream", VoidTy, VoidPtrTy);
+  // NewBuilder.CreateCall(KitCudaSyncFn, {LaunchStream});
   TOI.ReplCall->eraseFromParent();
 
   LLVM_DEBUG(dbgs() << "*** finished processing outlined call.\n");
@@ -2164,19 +2164,19 @@ void CudaABI::finalizeLaunchCalls(Module &M, GlobalVariable *Fatbin) {
                   }
                 }
 
-                // Currently, when __kitcuda_sync_thread_stream is called, the
-                // stream is assumed to be done with its work and recycled. So
-                // it must not be reused again. This could happen if the
-                // launch/sync block is called multiple times in a row should
-                // StreamAI retains its current value. Then multiple pointers to
-                // the same stream will be added to kitrt's internal queue and
-                // cause a SEGFAULT when we attempt to destroy them all due to
-                // multiple frees.
-                // Store null to StreamAI to prevent this. The stream itself can
-                // still be reused internally, but this time after popping from
-                // the queue.
-                SyncBuilder.CreateStore(ConstantPointerNull::get(VoidPtrTy),
-                                        StreamAI);
+                // // Currently, when __kitcuda_sync_thread_stream is called, the
+                // // stream is assumed to be done with its work and recycled. So
+                // // it must not be reused again. This could happen if the
+                // // launch/sync block is called multiple times in a row should
+                // // StreamAI retains its current value. Then multiple pointers to
+                // // the same stream will be added to kitrt's internal queue and
+                // // cause a SEGFAULT when we attempt to destroy them all due to
+                // // multiple frees.
+                // // Store null to StreamAI to prevent this. The stream itself can
+                // // still be reused internally, but this time after popping from
+                // // the queue.
+                // SyncBuilder.CreateStore(ConstantPointerNull::get(VoidPtrTy),
+                //                         StreamAI);
 
                 SavedLaunchCI = nullptr;
                 LLVM_DEBUG(dbgs() << "\t\t\t* patched call: " << *CI << "\n");

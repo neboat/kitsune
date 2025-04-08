@@ -50,6 +50,7 @@
 
 #include "kitcuda.h"
 #include "kitcuda_dylib.h"
+#include <cstddef>
 #include <mutex>
 #include <stdio.h>
 #include <sys/syscall.h>
@@ -100,6 +101,10 @@ void *__kitcuda_get_thread_stream() {
 
 void __kitcuda_sync_thread_stream(void *opaque_stream) {
   assert(opaque_stream != nullptr && "unexpected null stream pointer!");
+  if (opaque_stream == nullptr)
+    // TODO: Allow syncs of NULL stream?  Need to avoid adding the NULL stream
+    // to _kitcuda_streams in that case.
+    return;
   KIT_NVTX_PUSH("kitcuda:sync_thread_stream", KIT_NVTX_STREAM);
   CUstream stream = (CUstream)opaque_stream;
   if (__kitrt_verbose_mode())
