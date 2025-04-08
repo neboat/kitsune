@@ -65,8 +65,12 @@ logger.addHandler(handler)
 
 
 class Invocation:
-    cilk_path = os.environ.get("OPENCILK_PATH", "/home/chengyuan/Projects/opencilk/build")
-    kitsune_path = os.environ.get("KITSUNE_PATH", "/home/chengyuan/Projects/kitsune/build")
+    cilk_path = os.environ.get(
+        "OPENCILK_PATH", "/home/chengyuan/Projects/opencilk/build"
+    )
+    kitsune_path = os.environ.get(
+        "KITSUNE_PATH", "/home/chengyuan/Projects/kitsune/build"
+    )
 
     clang_args: list[str] = []
     opt_args: list[str] = []
@@ -396,7 +400,7 @@ class Invocation:
             else self.object_files
         )
 
-        kitrt_dir = f"{self.kitsune_path}/tools/kitsune/kitrt/lib/clang/19/lib"
+        kitrt_dir = f"{self.kitsune_path}/lib/clang/19/lib"
         opencilk_dir = f"{self.kitsune_path}/lib/clang/19/lib/x86_64-unknown-linux-gnu"
 
         self._run_command(
