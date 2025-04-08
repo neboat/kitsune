@@ -97,5 +97,18 @@ bool TapirCleanup::runOnFunction(Function &F) {
     Changed = true;
   }
 
+  // Clean up hyper.lookup calls
+  SmallVector<Instruction *, 8> ToErase;
+  for (BasicBlock &BB : F)
+    for (Instruction &I : BB)
+      if (isTapirIntrinsic(Intrinsic::hyper_lookup, &I)) {
+        I.replaceAllUsesWith(cast<CallBase>(&I)->getArgOperand(0));
+        ToErase.push_back(&I);
+        Changed = true;
+      }
+
+  for (Instruction *I : ToErase)
+    I->eraseFromParent();
+
   return Changed;
 }

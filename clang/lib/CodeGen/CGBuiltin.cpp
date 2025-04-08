@@ -6244,6 +6244,31 @@ RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
     auto Str = CGM.GetAddrOfConstantCString(Name, "");
     return RValue::get(Str.getPointer());
   }
+  case Builtin::BI__hyper_lookup: {
+    llvm::Value *Size = EmitScalarExpr(E->getArg(1));
+    Function *F = CGM.getIntrinsic(Intrinsic::hyper_lookup, Size->getType());
+    llvm::Value *Ptr = EmitScalarExpr(E->getArg(0));
+    llvm::Value *Identity = EmitScalarExpr(E->getArg(2));
+    llvm::Value *Reduce = EmitScalarExpr(E->getArg(3));
+    return RValue::get(Builder.CreateCall(
+        F, {Ptr, Size, Builder.CreateBitCast(Identity, VoidPtrTy),
+            Builder.CreateBitCast(Reduce, VoidPtrTy)}));
+  }
+  case Builtin::BI__hyper_register: {
+    llvm::Value *Size = EmitScalarExpr(E->getArg(1));
+    Function *F = CGM.getIntrinsic(Intrinsic::reducer_register, Size->getType());
+    llvm::Value *Ptr = EmitScalarExpr(E->getArg(0));
+    llvm::Value *Identity = EmitScalarExpr(E->getArg(2));
+    llvm::Value *Reduce = EmitScalarExpr(E->getArg(3));
+    return RValue::get(Builder.CreateCall(
+        F, {Ptr, Size, Builder.CreateBitCast(Identity, VoidPtrTy),
+            Builder.CreateBitCast(Reduce, VoidPtrTy)}));
+  }
+  case Builtin::BI__hyper_deregister: {
+    Function *F = CGM.getIntrinsic(Intrinsic::reducer_unregister);
+    llvm::Value *Ptr = EmitScalarExpr(E->getArg(0));
+    return RValue::get(Builder.CreateCall(F, {Ptr}));
+  }
   }
   IsSpawnedScope SpawnedScp(this);
 
