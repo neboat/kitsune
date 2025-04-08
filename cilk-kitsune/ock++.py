@@ -4,6 +4,7 @@
 
 import atexit
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -64,8 +65,8 @@ logger.addHandler(handler)
 
 
 class Invocation:
-    cilk_path = "/home/chengyuan/Projects/opencilk/build"
-    kitsune_path = "/home/chengyuan/Projects/kitsune/build"
+    cilk_path = os.environ.get("OPENCILK_PATH", "/home/chengyuan/Projects/opencilk/build")
+    kitsune_path = os.environ.get("KITSUNE_PATH", "/home/chengyuan/Projects/kitsune/build")
 
     clang_args: list[str] = []
     opt_args: list[str] = []
