@@ -4768,3 +4768,25 @@ def ArithmeticFence : LangBuiltin<"ALL_LANGUAGES"> {
   let Attributes = [CustomTypeChecking, Constexpr];
   let Prototype = "void(...)";
 }
+
+// Tapir.  Convenient built-in for registering hyperobjects.
+def HyperRegister : Builtin {
+  let Spellings = ["__hyper_register"];
+  let Attributes = [NoThrow, Pure];
+  let Prototype = "void(void const*, size_t, ...)";
+}
+
+// Tapir.  Convenient built-in for deregistering hyperobjects.
+def HyperDeregister : Builtin {
+  let Spellings = ["__hyper_deregister"];
+  let Attributes = [NoThrow, Pure];
+  let Prototype = "void(void const*)";
+}
+
+// Tapir.  Rewriting of reducer references happens during sema
+// and needs a builtin to carry the information to codegen.
+def HyperLookup : Builtin {
+  let Spellings = ["__hyper_lookup"];
+  let Attributes = [NoThrow, Pure];
+  let Prototype = "void*(void const*, size_t, ...)";
+}
