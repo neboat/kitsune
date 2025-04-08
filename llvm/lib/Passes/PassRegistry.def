@@ -653,7 +653,8 @@ LOOP_PASS("print<ddg>", DDGAnalysisPrinterPass(dbgs()))
 LOOP_PASS("print<iv-users>", IVUsersPrinterPass(dbgs()))
 LOOP_PASS("print<loop-cache-cost>", LoopCachePrinterPass(dbgs()))
 LOOP_PASS("print<loopnest>", LoopNestPrinterPass(dbgs()))
-LOOP_PASS("tapir-indvars", TapirIndVarSimplifyPass())
+LOOP_PASS("tapir-indvars",
+          IndVarSimplifyPass(/*WidenIndVars=*/true, /*TapirLoopsOnly=*/true))
 #undef LOOP_PASS
 
 #ifndef LOOP_PASS_WITH_PARAMS
