@@ -89,6 +89,7 @@ target_link_libraries(${KITRT}
   dl)
 
 target_link_libraries(${KITRT} PRIVATE phmap Boost::intrusive)
+target_link_options(${KITRT} PUBLIC "-fuse-ld=lld")
 
 # The KITSUNE_CUDA_* variables are defined in ../CMakeLists.txt (i.e. in
 # kitsune/CMakeLists.txt). They are passed in via CMake because the Kitsune
