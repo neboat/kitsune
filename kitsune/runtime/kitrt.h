@@ -308,8 +308,8 @@ using string =
 
 } // namespace kitrt
 
-#ifdef __GLIBCXX__
-#if __GLIBCXX__ < 20230426 // 13.1.0
+// #ifdef __GLIBCXX__
+// #if __GLIBCXX__ < 20230426 // 13.1.0
 // LWG 3705: hashability of basic_string should not depend on allocator.
 // This defect report was only fixed in GCC 13.1. See
 // https://github.com/gcc-mirror/gcc/commit/b370ed0bf93ecf0ff51d29e7fc132c433b2aa1be
@@ -322,8 +322,8 @@ template <> struct hash<kitrt::string> {
   }
 };
 } // namespace std
-#endif
-#endif
+// #endif
+// #endif
 
 #endif // __KITRT_H__
 
