@@ -1709,6 +1709,10 @@ void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
   // introduced via the input source details and the runtime's
   // API type signature for the launch.
   Value *TripCount = OrderedInputs[0];
+  if (TL.isInclusiveRange()) {
+    TripCount = NewBuilder.CreateAdd(
+        TripCount, ConstantInt::get(TripCount->getType(), 1), "tc.inclusive");
+  }
   Value *CastTripCount = nullptr;
   if (TripCount->getType() != Int64Ty) {
     CastTripCount = CastInst::CreateIntegerCast(TripCount, Int64Ty, false);
