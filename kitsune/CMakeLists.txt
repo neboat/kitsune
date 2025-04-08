@@ -554,7 +554,7 @@ set(KITSUNE_KITRT_INSTALL_DIR ${KITSUNE_BINARY_DIR}/kitrt)
 #     endforeach()
 #
 ExternalProject_Add(kitrt
-  DEPENDS llvm-config clang LLVM
+  DEPENDS llvm-config clang lld LLVM
   SOURCE_DIR ${KITSUNE_SOURCE_DIR}/runtime
   STAMP_DIR ${KITSUNE_BINARY_DIR}/stamp
   BINARY_DIR ${KITSUNE_BINARY_DIR}/runtime

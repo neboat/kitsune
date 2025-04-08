@@ -71,6 +71,8 @@ target_link_libraries(${KITRT}
   rt
   dl)
 
+target_link_options(${KITRT} PUBLIC "-fuse-ld=lld")
+
 # The KITSUNE_CUDA_* variables are defined in ../CMakeLists.txt (i.e. in
 # kitsune/CMakeLists.txt). They are passed in via CMake because the Kitsune
 # runtime is treated as an "ExternalProject".
