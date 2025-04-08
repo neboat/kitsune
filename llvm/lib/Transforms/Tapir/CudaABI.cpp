@@ -2661,7 +2661,7 @@ CudaABIOutputFile CudaABI::generatePTX() {
   if (OptLevel > 0) {
     // TODO: ptxas is very limited in its ability to generate optimized debug info.
     // For now, strip the debug info when using optimization.
-    StripDebugInfo(KernelModule);
+    // StripDebugInfo(KernelModule);
     if (OptLevel > 3)
       OptLevel = 3;
     LLVM_DEBUG(dbgs() << "\t- running kernel module optimization passes...\n");
@@ -2726,6 +2726,7 @@ CudaABIOutputFile CudaABI::generatePTX() {
 
     ModulePassManager MPM =
         PB.buildPerModuleDefaultPipeline(OptLevels[OptLevel]);
+    MPM.addPass(StripSymbolsPass());
     MPM.addPass(VerifierPass());
     // MPM.printPipeline(dbgs(), [](StringRef Name) { return Name; });
     LLVM_DEBUG(dbgs() << "\t\t* module: " << KernelModule.getName() << "\n");
