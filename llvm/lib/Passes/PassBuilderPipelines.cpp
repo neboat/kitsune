@@ -128,6 +128,7 @@
 #include "llvm/Transforms/Scalar/WarnMissedTransforms.h"
 #include "llvm/Transforms/Tapir/LoopSpawningTI.h"
 #include "llvm/Transforms/Tapir/LoopStripMinePass.h"
+#include "llvm/Transforms/Tapir/MemOpsReplacement.h"
 #include "llvm/Transforms/Tapir/SerializeSmallTasks.h"
 #include "llvm/Transforms/Tapir/TapirToTarget.h"
 #include "llvm/Transforms/Tapir/DRFScopedNoAliasAA.h"
@@ -1717,6 +1718,8 @@ PassBuilder::buildTapirLoweringPipeline(OptimizationLevel Level,
   MPM.addPass(TapirToTargetPass());
   if (VerifyTapirLowering)
     MPM.addPass(VerifierPass());
+
+  MPM.addPass(createModuleToFunctionPassAdaptor(MemOpsReplacementPass()));
 
   // The TapirToTarget pass may leave cruft around.  Clean it up using the
   // function simplification pipeline.
