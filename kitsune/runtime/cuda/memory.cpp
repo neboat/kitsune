@@ -91,10 +91,7 @@ extern "C" {
 static __attribute__((malloc)) void *
 __kitcuda_mem_alloc_managed_internal(size_t size) {
   KIT_NVTX_PUSH("kitcuda:mem_alloc_managed", KIT_NVTX_MEM);
-  CUcontext curctx;
-  CU_SAFE_CALL(cuCtxGetCurrent_p(&curctx));
-  if (curctx == NULL)
-    CU_SAFE_CALL(cuCtxSetCurrent_p(_kitcuda_context));
+  __kitcuda_set_context();
 
   CUdeviceptr devp;
   CU_SAFE_CALL(cuMemAllocManaged_p(&devp, size, CU_MEM_ATTACH_GLOBAL));
@@ -324,7 +321,7 @@ bool __kitcuda_is_mem_managed(void *vp) {
 void *__kitcuda_mem_gpu_prefetch(void *vp, void *opaque_stream) {
   assert(vp && "unexpected null pointer!");
 
-  KIT_NVTX_PUSH("kitcuda:mem_gpu_prefetch", KIT_NVTX_MEM);
+  KIT_NVTX_PUSH("kitcuda:mem_gpu_prefetch", 1);
 
   size_t size = 0;
   // TODO: Prefetching details and approaches need to be further
@@ -341,10 +338,7 @@ void *__kitcuda_mem_gpu_prefetch(void *vp, void *opaque_stream) {
   // while also maintaining correctness.
   if (not __kitrt_is_mem_prefetched(vp, &size)) {
     if (size > 0) {
-      CUcontext cu_context;
-      CU_SAFE_CALL(cuCtxGetCurrent_p(&cu_context));
-      if (cu_context == NULL)
-        CU_SAFE_CALL(cuCtxSetCurrent_p(_kitcuda_context));
+      __kitcuda_set_context();
 
       // TODO: More work and experimentation needs to be done with
       // managed memory and the advice settings...
@@ -397,10 +391,10 @@ void *__kitcuda_mem_gpu_prefetch(void *vp, void *opaque_stream) {
       KIT_NVTX_POP();
       return (void *)cu_stream;
     }
-  } else if (!__kitcuda_is_mem_managed(vp)) {
+  } /*else if (!__kitcuda_is_mem_managed(vp)) {
     // We are cooked
     fprintf(stderr, "kitcuda: warning, prefetching unmanaged memory: %p\n", vp);
-  }
+  }*/
   KIT_NVTX_POP();
   // no prefetch, no bound stream to bound it to...
   return nullptr;
@@ -461,10 +455,7 @@ void __kitcuda_memcpy_sym_to_device(void *hostPtr, uint64_t devPtr,
 void *__kitcuda_mem_alloc_and_copy_to_device(void *host_ptr, size_t size,
                                              void **dev_ptr,
                                              void *opaque_stream) {
-  CUcontext cu_context;
-  CU_SAFE_CALL(cuCtxGetCurrent_p(&cu_context));
-  if (cu_context == NULL)
-    CU_SAFE_CALL(cuCtxSetCurrent_p(_kitcuda_context));
+  __kitcuda_set_context();
 
   KIT_NVTX_PUSH("kitcuda:mem_alloc_device_and_copy", KIT_NVTX_MEM);
   CUstream cu_stream = opaque_stream ? (CUstream)opaque_stream
@@ -550,10 +541,7 @@ void __kitcuda_memcpy(void *dst, void *src, size_t size) {
     memcpy(dst, src, size);
     return;
   }
-  CUcontext curctx;
-  CU_SAFE_CALL(cuCtxGetCurrent_p(&curctx));
-  if (curctx == NULL)
-    CU_SAFE_CALL(cuCtxSetCurrent_p(_kitcuda_context));
+  __kitcuda_set_context();
 
   CU_SAFE_CALL(cuMemcpy_p(reinterpret_cast<CUdeviceptr>(dst),
                           reinterpret_cast<CUdeviceptr>(src), size));
@@ -583,10 +571,7 @@ void __kitcuda_memset(void *dst, uint8_t value, size_t size) {
   if (not _kitcuda_initialized)
     __kitcuda_initialize();
 
-  CUcontext curctx;
-  CU_SAFE_CALL(cuCtxGetCurrent_p(&curctx));
-  if (curctx == NULL)
-    CU_SAFE_CALL(cuCtxSetCurrent_p(_kitcuda_context));
+  __kitcuda_set_context();
 
   if (__kitcuda_is_mem_managed(dst)) {
     CU_SAFE_CALL(

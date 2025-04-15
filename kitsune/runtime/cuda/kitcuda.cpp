@@ -98,6 +98,13 @@ const int KIT_NVTX_CLEANUP = 4;
 
 extern "C" {
 
+void __kitcuda_set_context() {
+  CUcontext ctx;
+  CU_SAFE_CALL(cuCtxGetCurrent_p(&ctx));
+  if (ctx == NULL)
+    CU_SAFE_CALL(cuCtxSetCurrent_p(_kitcuda_context));
+}
+
 bool __kitcuda_initialize() {
   KIT_NVTX_PUSH("kitcuda: initialize", KIT_NVTX_INIT);
   if (_kitcuda_initialized) {

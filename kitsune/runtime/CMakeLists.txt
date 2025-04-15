@@ -52,7 +52,16 @@ if (KITRT_ENABLE_VERBOSE)
   target_compile_definitions(${KITRT} -D_KITRT_VERBOSE_)
 endif()
 
+# Add parallel-hashmap dependency
+FetchContent_Declare(
+  parallel_hashmap
+  URL https://github.com/greg7mdp/parallel-hashmap/archive/refs/tags/v2.0.0.tar.gz
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(parallel_hashmap)
+
 target_include_directories(${KITRT} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(${KITRT} PRIVATE ${parallel_hashmap_SOURCE_DIR})
 set_target_properties(${KITRT} PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY ${CLANG_RESOURCE_INTDIR}/lib)
 

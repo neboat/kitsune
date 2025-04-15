@@ -54,6 +54,7 @@
 
 #include <array>
 #include <mutex>
+#include <optional>
 #include <string>
 
 // *** EXPERIMENTAL: The runtime maintains a map from fatbinary images
@@ -74,6 +75,34 @@ static std::mutex _kitcuda_module_map_mutex;
 // TODO: Finish exploration of map vs. CUDA call overheads.
 typedef kitrt::unordered_map<const char *, CUfunction> KitCudaKernelMap;
 static KitCudaKernelMap _kitcuda_kernel_map;
+
+struct KitCudaLaunchParamKey {
+  CUfunction cu_func;
+  size_t trip_count;
+
+  bool operator==(const KitCudaLaunchParamKey &other) const {
+    return cu_func == other.cu_func && trip_count == other.trip_count;
+  }
+};
+
+namespace std {
+template <> struct hash<KitCudaLaunchParamKey> {
+  size_t operator()(const KitCudaLaunchParamKey &key) const {
+    size_t seed = 0;
+    // Use boost::hash_combine to combine the hashes of the two members. See
+    // https://www.boost.org/doc/libs/1_55_0/doc/html/hash/reference.html#boost.hash_combine
+    seed ^= std::hash<CUfunction>()(key.cu_func) + 0x9e3779b9 + (seed << 6) +
+            (seed >> 2);
+    seed ^= std::hash<size_t>()(key.trip_count) + 0x9e3779b9 + (seed << 6) +
+            (seed >> 2);
+    return seed;
+  }
+};
+} // namespace std
+
+typedef kitrt::unordered_map<KitCudaLaunchParamKey, int> KitCudaLaunchParamMap;
+static KitCudaLaunchParamMap _kitcuda_launch_param_map;
+static std::mutex _kitcuda_launch_param_map_mutex;
 
 extern "C" {
 
@@ -148,9 +177,6 @@ void __kitcuda_set_default_threads_per_blk(int threads_per_blk) {
     threads_per_blk = _kitcuda_default_max_threads_per_blk;
   _kitcuda_default_threads_per_blk = threads_per_blk;
 }
-
-typedef kitrt::unordered_map<kitrt::string, int> KitCudaLaunchParamMap;
-static KitCudaLaunchParamMap _kitcuda_launch_param_map;
 
 namespace {
 
@@ -282,21 +308,11 @@ void __kitcuda_get_launch_params(size_t trip_count, CUfunction cu_func,
   // EXPERIMENTAL: Our 'forall' kernels have zero shared memory usage so
   // tweak the kernel's cache configuration to prefer L1 usage vs. shared
   // or 'split' usage of the local memory.
-  CU_SAFE_CALL(cuFuncSetCacheConfig_p(cu_func, CU_FUNC_CACHE_PREFER_L1));
+  // CU_SAFE_CALL(cuFuncSetCacheConfig_p(cu_func, CU_FUNC_CACHE_PREFER_L1));
 
-  // EXPERIMENTAL: To reduce some overheads the runtime caches launch
-  // parameters for each kernel.  Check to see if we have already set
-  // the launch parameters for this kernel and trip count.
-  const char *cu_func_name;
-  CU_SAFE_CALL(cuFuncGetName_p(&cu_func_name, cu_func));
-
-  std::array<char, 256> map_entry_buf;
-  std::snprintf(map_entry_buf.data(), map_entry_buf.size(), "%s_%zu",
-                cu_func_name, trip_count);
-  kitrt::string map_entry_name(map_entry_buf.data());
-
-  KitCudaLaunchParamMap::iterator lpit =
-      _kitcuda_launch_param_map.find(map_entry_name);
+  KitCudaLaunchParamKey key = {cu_func, trip_count};
+  _kitcuda_launch_param_map_mutex.lock();
+  KitCudaLaunchParamMap::iterator lpit = _kitcuda_launch_param_map.find(key);
 
   if (lpit != _kitcuda_launch_param_map.end())
     // use previously determined parameters.
@@ -309,8 +325,9 @@ void __kitcuda_get_launch_params(size_t trip_count, CUfunction cu_func,
                                       blks_per_grid, inst_mix);
     else
       threads_per_blk = _kitcuda_default_threads_per_blk;
-    _kitcuda_launch_param_map[map_entry_name] = threads_per_blk;
+    _kitcuda_launch_param_map[key] = threads_per_blk;
   }
+  _kitcuda_launch_param_map_mutex.unlock();
 
   blks_per_grid = (trip_count + threads_per_blk - 1) / threads_per_blk;
   KIT_NVTX_POP();
@@ -332,10 +349,7 @@ void *__kitcuda_launch_kernel(const void *fat_bin, const char *kernel_name,
   // thread enters without having previously set the context the CUDA
   // runtime becomes unhappy with us.  Make sure we're following the
   // rules.
-  CUcontext ctx;
-  CU_SAFE_CALL(cuCtxGetCurrent_p(&ctx));
-  if (ctx == NULL)
-    CU_SAFE_CALL(cuCtxSetCurrent_p(_kitcuda_context));
+  __kitcuda_set_context();
 
   CUfunction cu_func;
   _kitcuda_module_map_mutex.lock();
@@ -410,10 +424,8 @@ uint64_t __kitcuda_get_global_symbol(void *fat_bin, const char *sym_name) {
   //
   // TODO: This code is shared verbatim w/ the kernel launch.  We should
   // move it to a shared call...
-  CUcontext ctx;
-  CU_SAFE_CALL(cuCtxGetCurrent_p(&ctx));
-  if (ctx == NULL)
-    CU_SAFE_CALL(cuCtxSetCurrent_p(_kitcuda_context));
+  __kitcuda_set_context();
+
   CUmodule cu_module;
   _kitcuda_module_map_mutex.lock();
   KitCudaModuleMap::iterator modit = _kitcuda_module_map.find(fat_bin);

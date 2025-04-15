@@ -72,6 +72,8 @@
 
 #include <execinfo.h>
 
+#include <parallel_hashmap/phmap.h>
+
 #ifdef __cplusplus
 extern "C" {
 #else
@@ -293,11 +295,12 @@ bool operator!=(const GlibcAllocator<T> &, const GlibcAllocator<U> &) noexcept {
 
 template <typename T>
 using unordered_set =
-    std::unordered_set<T, std::hash<T>, std::equal_to<T>, GlibcAllocator<T>>;
+    phmap::flat_hash_set<T, std::hash<T>, std::equal_to<T>, GlibcAllocator<T>>;
 
 template <typename K, typename V>
-using unordered_map = std::unordered_map<K, V, std::hash<K>, std::equal_to<K>,
-                                         GlibcAllocator<std::pair<const K, V>>>;
+using unordered_map =
+    phmap::flat_hash_map<K, V, std::hash<K>, std::equal_to<K>,
+                         GlibcAllocator<std::pair<const K, V>>>;
 
 template <typename T> using deque = std::deque<T, GlibcAllocator<T>>;
 

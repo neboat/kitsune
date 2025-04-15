@@ -407,6 +407,8 @@ extern void __kitcuda_destroy_reducer_cache();
 
 extern void __kitcuda_destroy_mem_chunks();
 
+extern void __kitcuda_set_context();
+
 /*
  * The following global state lives within the runtime to avoid
  * exposing these details into the code generation details. These

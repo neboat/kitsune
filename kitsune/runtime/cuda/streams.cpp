@@ -50,13 +50,13 @@
 
 #include "kitcuda.h"
 #include "kitcuda_dylib.h"
+#include <algorithm>
+#include <deque>
 #include <mutex>
+#include <optional>
 #include <stdio.h>
 #include <sys/syscall.h>
 #include <unistd.h>
-#include <deque>
-#include <algorithm>
-
 
 // On older systems gettid() is not exposed and the syscall()
 // interface must be used.  It won't hurt us to just use that
@@ -68,6 +68,7 @@
 typedef kitrt::deque<CUstream> KitCudaStreamList;
 static KitCudaStreamList _kitcuda_streams;
 static std::mutex _kitcuda_stream_mutex;
+static thread_local std::optional<CUstream> _kitcuda_local_stream;
 
 #ifdef __cplusplus
 extern "C" {
@@ -77,7 +78,13 @@ extern "C" {
 
 void *__kitcuda_get_thread_stream() {
   KIT_NVTX_PUSH("kitcuda:get_thread_stream", KIT_NVTX_STREAM);
-
+  if (_kitcuda_local_stream) {
+    KIT_NVTX_POP();
+    if (__kitrt_verbose_mode())
+      fprintf(stderr, "reusing local thread stream: %p\n",
+              *_kitcuda_local_stream);
+    return *_kitcuda_local_stream;
+  }
   CUstream cu_stream;
   _kitcuda_stream_mutex.lock();
   if (not _kitcuda_streams.empty()) {
@@ -85,11 +92,11 @@ void *__kitcuda_get_thread_stream() {
     _kitcuda_streams.pop_front();
     _kitcuda_stream_mutex.unlock();
     if (__kitrt_verbose_mode())
-       fprintf(stderr, "reusing thread stream.\n");
+      fprintf(stderr, "reusing thread stream.\n");
   } else {
     _kitcuda_stream_mutex.unlock();
     if (__kitrt_verbose_mode())
-       fprintf(stderr, "creating new thread stream.\n");
+      fprintf(stderr, "creating new thread stream.\n");
     CU_SAFE_CALL(cuStreamCreate(&cu_stream, CU_STREAM_NON_BLOCKING));
   }
   KIT_NVTX_POP();
@@ -102,6 +109,11 @@ void __kitcuda_sync_thread_stream(void *opaque_stream) {
   assert(opaque_stream != nullptr && "unexpected null stream pointer!");
   KIT_NVTX_PUSH("kitcuda:sync_thread_stream", KIT_NVTX_STREAM);
   CUstream stream = (CUstream)opaque_stream;
+  if (_kitcuda_local_stream.has_value() && (*_kitcuda_local_stream == stream)) {
+    // No need to sync it now
+    KIT_NVTX_POP();
+    return;
+  }
   CU_SAFE_CALL(cuStreamSynchronize_p(stream));
   // In our current use case a synchronized stream is done doing
   // any useful work.  Recycle it for later use... 
@@ -111,14 +123,24 @@ void __kitcuda_sync_thread_stream(void *opaque_stream) {
   KIT_NVTX_POP();
 }
 
+void __kitcuda_local_stream_begin() {
+  assert(!_kitcuda_local_stream.has_value() &&
+         "attempting to create a local stream when one already exists!");
+  _kitcuda_local_stream = (CUstream)__kitcuda_get_thread_stream();
+}
+
+void __kitcuda_local_stream_end() {
+  assert(_kitcuda_local_stream.has_value() &&
+         "attempting to destroy a local stream when one does not exist!");
+  void *opaque_stream = *_kitcuda_local_stream;
+  _kitcuda_local_stream.reset();
+  __kitcuda_sync_thread_stream(opaque_stream);
+}
+
 void __kitcuda_sync_context() {
   KIT_NVTX_PUSH("kitcuda:sync_context", KIT_NVTX_STREAM);
   CUcontext ctx;
-  // TODO: We have multiple calls to set the context for the calling
-  // thread -- should probably wrap it in a function.
-  CU_SAFE_CALL(cuCtxGetCurrent_p(&ctx));
-  if (ctx == NULL)
-    CU_SAFE_CALL(cuCtxSetCurrent_p(__kitcuda_get_context()));
+  __kitcuda_set_context();
   CU_SAFE_CALL(cuCtxSynchronize_p());
   KIT_NVTX_POP();
 }
