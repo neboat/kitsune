@@ -98,6 +98,11 @@ DECLARE_DLSYM(cuStreamCreate);
 DECLARE_DLSYM(cuStreamDestroy_v2);
 DECLARE_DLSYM(cuStreamSynchronize);
 DECLARE_DLSYM(cuStreamAttachMemAsync);
+DECLARE_DLSYM(cuEventCreate);
+DECLARE_DLSYM(cuEventDestroy_v2);
+DECLARE_DLSYM(cuEventRecord);
+DECLARE_DLSYM(cuStreamWaitEvent);
+DECLARE_DLSYM(cuLaunchHostFunc);
 
 /* Kernel launching, fat binary, module related */
 DECLARE_DLSYM(cuLaunchKernel);

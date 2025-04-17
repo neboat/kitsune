@@ -386,19 +386,17 @@ extern void __kitcuda_sync_thread_stream(void *opaque_stream);
 extern void __kitcuda_sync_context();
 
 /**
- * Destroy the stream that is associated with the calling thread.
- * If a stream has not been assigned to the thread this call will
- * simply return and function as a no-op.
- */
-extern void __kitcuda_delete_thread_stream(void *opaque_stream);
-
-/**
  * Destroy all the thread-associated streams that are being managed
  * by the runtime.  This call will essentially use CUDA to destroy
  * each stream and the associated data structure entries used by the
  * runtime.
  */
 extern void __kitcuda_destroy_thread_streams();
+
+/**
+ * Initialize thread stream global reducer object.
+ */
+extern void __kitcuda_initialize_thread_streams();
 
 /**
  * Destroy all cached device-side reducer views.

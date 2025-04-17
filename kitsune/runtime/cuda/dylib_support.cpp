@@ -130,6 +130,11 @@ bool __kitcuda_load_symbols() {
   DLSYM_LOAD(cuStreamDestroy_v2);
   DLSYM_LOAD(cuStreamSynchronize);
   DLSYM_LOAD(cuStreamAttachMemAsync);
+  DLSYM_LOAD(cuEventCreate);
+  DLSYM_LOAD(cuEventDestroy_v2);
+  DLSYM_LOAD(cuEventRecord);
+  DLSYM_LOAD(cuStreamWaitEvent);
+  DLSYM_LOAD(cuLaunchHostFunc);
 
   /* Kernel launching, fat binary, module related */
   DLSYM_LOAD(cuLaunchKernel);

@@ -241,6 +241,7 @@ bool __kitcuda_initialize() {
     _kitcuda_big_block_threshold = 4096; // 4KB
   }
 
+  __kitcuda_initialize_thread_streams();
   KIT_NVTX_POP();
   return _kitcuda_initialized;
 }
