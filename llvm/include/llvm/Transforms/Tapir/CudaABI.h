@@ -69,6 +69,7 @@ class CudaLoop;
 typedef std::unique_ptr<ToolOutputFile> CudaABIOutputFile;
 
 class CudaABI : public TapirTarget {
+  friend class CudaLoop;
 
 public:
   CudaABI(Module &M);

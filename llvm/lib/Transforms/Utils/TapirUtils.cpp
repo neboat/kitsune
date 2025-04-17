@@ -2333,8 +2333,8 @@ void llvm::TapirLoopHints::setHint(StringRef Name, Metadata *Arg) {
     return;
   unsigned Val = C->getZExtValue();
 
-  Hint *Hints[] = {&Strategy, &Grainsize, &LoopTarget,
-                   &ThreadsPerBlock, &AutoTune};
+  Hint *Hints[] = {&Strategy,        &Grainsize, &LoopTarget,
+                   &ThreadsPerBlock, &AutoTune,  &DeferredSync};
   for (auto H : Hints) {
     if (Name == H->Name) {
       if (H->validate(Val))

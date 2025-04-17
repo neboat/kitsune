@@ -255,11 +255,14 @@ public:
   };
 
 private:
-  enum HintKind { HK_STRATEGY,
-                  HK_GRAINSIZE,
-                  HK_LOOPTARGET,
-                  HK_THREADS_PER_BLOCK,
-                  HK_AUTO_TUNE };
+  enum HintKind {
+    HK_STRATEGY,
+    HK_GRAINSIZE,
+    HK_LOOPTARGET,
+    HK_THREADS_PER_BLOCK,
+    HK_AUTO_TUNE,
+    HK_DEFERRED_SYNC
+  };
 
   /// Hint - associates name and validation with the hint value.
   struct Hint {
@@ -281,6 +284,8 @@ private:
         // way?
         return (Val <
                 static_cast<unsigned int>(TapirTargetID::Last_TapirTargetID));
+      case HK_DEFERRED_SYNC:
+        return Val == 0 || Val == 1;
       case HK_THREADS_PER_BLOCK:
         return Val;
       case HK_AUTO_TUNE:
@@ -296,6 +301,8 @@ private:
   Hint Grainsize;
   /// LoopTarget
   Hint LoopTarget;
+  /// DeferredSync
+  Hint DeferredSync;
   Hint ThreadsPerBlock;
   Hint AutoTune;
 
@@ -322,14 +329,14 @@ public:
   TapirLoopHints(const Loop *L)
       : Strategy("spawn.strategy", ST_SEQ, HK_STRATEGY),
         Grainsize("grainsize", 0, HK_GRAINSIZE),
-        // DWS don't like the conversion from scoped enum to unsigned, better way?
-        // Is Serial the right default, here and and in clearHintsMetadata
+        // DWS don't like the conversion from scoped enum to unsigned, better
+        // way? Is Serial the right default, here and and in clearHintsMetadata
         LoopTarget("target", static_cast<unsigned int>(TapirTargetID::Serial),
-		   HK_LOOPTARGET),
-	ThreadsPerBlock("kitsune.launch.threads.per.block", 0,
-			HK_THREADS_PER_BLOCK),
-	AutoTune("kitsune.launch.auto.tune", 0, HK_AUTO_TUNE),
-        TheLoop(L) {
+                   HK_LOOPTARGET),
+        DeferredSync("deferred_sync", 0, HK_DEFERRED_SYNC),
+        ThreadsPerBlock("kitsune.launch.threads.per.block", 0,
+                        HK_THREADS_PER_BLOCK),
+        AutoTune("kitsune.launch.auto.tune", 0, HK_AUTO_TUNE), TheLoop(L) {
     // Populate values with existing loop metadata.
     getHintsFromMetadata();
   }
@@ -363,6 +370,8 @@ public:
   unsigned getAutoTune() const {
     return AutoTune.Value;
   }
+
+  bool getDeferredSync() const { return DeferredSync.Value; }
 
   /// Clear Tapir Hints metadata.
   void clearHintsMetadata();

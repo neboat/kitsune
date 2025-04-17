@@ -1513,6 +1513,16 @@ void CudaLoop::remapData(ValueToValueMapTy &VMap) {
     }
   }
   ReducerInputs = std::move(NewReducerInputs);
+  // Remap SyncRegList
+  CudaABI::SyncRegionListTy NewSyncRegList;
+  for (auto &SyncReg : TTarget->SyncRegList) {
+    if (auto MappedV = VMap[SyncReg]) {
+      NewSyncRegList.insert(MappedV);
+    } else {
+      NewSyncRegList.insert(SyncReg);
+    }
+  }
+  TTarget->SyncRegList = std::move(NewSyncRegList);
 }
 
 void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
@@ -1762,12 +1772,17 @@ void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
     TTarget->registerReducerLaunchInfo(LaunchStream, LaunchInfo);
   }
 
-  // Experiment with generating a sync call right here (as opposed to end of
-  // sync region)
-  Type *VoidTy = Type::getVoidTy(Ctx);
-  FunctionCallee KitCudaSyncFn =
-      M.getOrInsertFunction("__kitcuda_sync_thread_stream", VoidTy, VoidPtrTy);
-  NewBuilder.CreateCall(KitCudaSyncFn, {LaunchStream});
+  LLVM_DEBUG(dbgs() << "\t\t+- deferred sync: " << Hints.getDeferredSync()
+                    << "\n");
+
+  if (!Hints.getDeferredSync() || !ReducerInputs.empty()) {
+    // Only generate sync call when the loop is not marked default sync or if
+    // it's a reduction
+    Type *VoidTy = Type::getVoidTy(Ctx);
+    FunctionCallee KitCudaSyncFn = M.getOrInsertFunction(
+        "__kitcuda_sync_thread_stream", VoidTy, VoidPtrTy);
+    NewBuilder.CreateCall(KitCudaSyncFn, {LaunchStream});
+  }
   TOI.ReplCall->eraseFromParent();
 
   LLVM_DEBUG(dbgs() << "*** finished processing outlined call.\n");
@@ -1901,18 +1916,21 @@ bool CudaABI::preProcessFunction(Function &F, TaskInfo &TI,
 
 void CudaABI::postProcessFunction(Function &F, bool OutliningTapirLoops) {
   if (OutliningTapirLoops) {
+    // LLVM_DEBUG(dbgs() << "cuabi: post-processing function '" << F.getName()
+    //                   << "'\n");
     // LLVMContext &Ctx = M.getContext();
     // Type *VoidTy = Type::getVoidTy(Ctx);
-    // PointerType *VoidPtrTy = PointerType::getUnqual(Ctx);
-    // Value *CudaStream = ConstantPointerNull::get(VoidPtrTy);
-    // FunctionCallee KitCudaSyncFn = M.getOrInsertFunction(
-    //     "__kitcuda_sync_thread_stream", VoidTy, VoidPtrTy);
-
+    // FunctionCallee KitCudaSyncFn =
+    //     M.getOrInsertFunction("__kitcuda_sync_current_stream", VoidTy);
     // for (Value *SR : SyncRegList) {
     //   for (Use &U : SR->uses()) {
-    //     if (auto *SyncI = dyn_cast<SyncInst>(U.getUser()))
-    //       CallInst::Create(KitCudaSyncFn, {CudaStream}, "",
+    //     if (auto *SyncI = dyn_cast<SyncInst>(U.getUser())) {
+    //       CallInst::Create(KitCudaSyncFn, {}, "",
     //                        &*SyncI->getSuccessor(0)->begin());
+    //       LLVM_DEBUG(dbgs() << "  cuabi: inserting sync call for sync region:
+    //       "
+    //                         << *SyncI << "\n");
+    //     }
     //   }
     // }
     SyncRegList.clear();
