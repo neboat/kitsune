@@ -414,15 +414,15 @@ class Invocation:
                 "-L/opt/cuda/lib64",
                 "-Wl,-rpath,/opt/cuda/lib64",
                 "-lcudart",
-                # Link in Kitsune runtime
-                f"-L{kitrt_dir}",
-                f"-Wl,-rpath,{kitrt_dir}",
-                "-lkitrt",
                 # Link in OpenCilk runtime
                 f"-L{opencilk_dir}",
                 f"-Wl,-rpath,{opencilk_dir}",
                 "-lopencilk",
                 "-lopencilk-personality-cpp",
+                # Link in Kitsune runtime
+                f"-L{kitrt_dir}",
+                f"-Wl,-rpath,{kitrt_dir}",
+                "-lkitrt",
             ],
             f"Kitsune compiler compiled to binary",
             print_cmd=True,
