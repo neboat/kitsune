@@ -831,6 +831,10 @@ static uint64_t getAttrKindEncoding(Attribute::AttrKind Kind) {
     return bitc::ATTR_KIND_SHADOWCALLSTACK;
   case Attribute::Stealable:
     return bitc::ATTR_KIND_STEALABLE;
+  case Attribute::StrandNoAlias:
+    return bitc::ATTR_KIND_STRAND_NO_ALIAS;
+  case Attribute::StrandPure:
+    return bitc::ATTR_KIND_STRAND_PURE;
   case Attribute::StrictFP:
     return bitc::ATTR_KIND_STRICT_FP;
   case Attribute::StructRet:
@@ -889,6 +893,14 @@ static uint64_t getAttrKindEncoding(Attribute::AttrKind Kind) {
     return bitc::ATTR_KIND_RANGE;
   case Attribute::Initializes:
     return bitc::ATTR_KIND_INITIALIZES;
+  case Attribute::Injective:
+    return bitc::ATTR_KIND_INJECTIVE;
+  case Attribute::HyperView:
+    return bitc::ATTR_KIND_HYPER_VIEW;
+  case Attribute::ReducerUnregister:
+    return bitc::ATTR_KIND_REDUCER_UNREGISTER;
+  case Attribute::ReducerRegister:
+    return bitc::ATTR_KIND_REDUCER_REGISTER;
   case Attribute::EndAttrKinds:
     llvm_unreachable("Can not encode end-attribute kinds marker.");
   case Attribute::None:
