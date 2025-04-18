@@ -59,9 +59,16 @@ FetchContent_Declare(
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(parallel_hashmap)
+FetchContent_Declare(
+  Boost
+  URL https://github.com/boostorg/boost/releases/download/boost-1.88.0/boost-1.88.0-cmake.tar.xz
+  URL_HASH SHA256=f48b48390380cfb94a629872346e3a81370dc498896f16019ade727ab72eb1ec
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+set(BOOST_INCLUDE_LIBRARIES assert config move intrusive)
+FetchContent_MakeAvailable(Boost)
 
 target_include_directories(${KITRT} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_include_directories(${KITRT} PRIVATE ${parallel_hashmap_SOURCE_DIR})
 set_target_properties(${KITRT} PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY ${CLANG_RESOURCE_INTDIR}/lib)
 
@@ -79,6 +86,8 @@ target_link_libraries(${KITRT}
   pthread
   rt
   dl)
+
+target_link_libraries(${KITRT} PRIVATE phmap Boost::intrusive)
 
 # The KITSUNE_CUDA_* variables are defined in ../CMakeLists.txt (i.e. in
 # kitsune/CMakeLists.txt). They are passed in via CMake because the Kitsune

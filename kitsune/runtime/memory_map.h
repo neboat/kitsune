@@ -64,16 +64,6 @@
 /// Prefetching suggests a hint to the runtime/driver/OS to migrate
 /// all pages to the corresponding device's memory.
 
-/// TODO: Is prefetch better tracked as a location vs. a boolean? 
-/// (Adding support for multiple devices will force this change but
-/// for now it is likely more complex than necessary.)
-struct KitRTAllocMapEntry {
-  bool    prefetched;   // has the data been prefetched?
-  bool    read_only;    // upcoming data usage is ("mostly") read only.
-  bool    write_only;   // upcoming data usage is ("mostly") write only.
-  size_t size;          // size of the allocated buffer in bytes.
-};
-
 /// Register a memory allocation with the runtime.  The allocation
 /// is assumed be successful at this point and pointed to by the
 /// supplied pointer (addr) and be 'numBytes' in size.
@@ -103,11 +93,12 @@ extern void __kitrt_mark_mem_write_only(void *addr);
 
 /// @brief  Mark the given managed memory allocation to need prefetching.
 /// @param addr: The pointer to the managed memory allocation.
-extern void __kitrt_mem_neds_prefetch(void *addr);
+extern void __kitrt_mem_needs_prefetch(void *addr);
 
 /// @brief Return the prefetch status of the given allocation.
 /// @param addr: The pointer to the managed allocation.
-bool __kitrt_is_mem_prefetched(void *addr, size_t *size = nullptr);
+bool __kitrt_is_mem_prefetched(void *addr, size_t *size = nullptr,
+                               void **base = nullptr);
 
 /// @brief Is the given managed allocation marked as ready-only?
 /// @param addr: The pointer to the managed allocation. 
@@ -124,7 +115,7 @@ void __kitrt_clear_mem_advice(void *addr);
 /// Get the size of the allocation for a given pointer address.
 size_t __kitrt_get_mem_alloc_size(void *addr,
 				  bool *read_only,
-				  bool *write_only);
+                                  bool *write_only);
 
 /// Unregister a memory allocation.  If the supplied pointer is not
 /// found in the allocation map the runtime will throw an assertion

@@ -324,6 +324,7 @@ void *__kitcuda_mem_gpu_prefetch(void *vp, void *opaque_stream) {
   KIT_NVTX_PUSH("kitcuda:mem_gpu_prefetch", 1);
 
   size_t size = 0;
+  void *base = nullptr;
   // TODO: Prefetching details and approaches need to be further
   // explored.  In particular, in concert with compiler analysis
   // and code generation.
@@ -336,9 +337,10 @@ void *__kitcuda_mem_gpu_prefetch(void *vp, void *opaque_stream) {
   // lead to page faults and evictions of pages...  At present this
   // has lead to the best general performance and reduced complexity,
   // while also maintaining correctness.
-  if (not __kitrt_is_mem_prefetched(vp, &size)) {
+  if (not __kitrt_is_mem_prefetched(vp, &size, &base)) {
     if (size > 0) {
       __kitcuda_set_context();
+      vp = base;
 
       // TODO: More work and experimentation needs to be done with
       // managed memory and the advice settings...
@@ -406,8 +408,10 @@ void *__kitcuda_mem_host_prefetch(void *vp, void *opaque_stream) {
   KIT_NVTX_PUSH("kitcuda:mem_host_prefetch", KIT_NVTX_MEM);
 
   size_t size;
-  if (__kitrt_is_mem_prefetched(vp, &size)) {
+  void *base;
+  if (__kitrt_is_mem_prefetched(vp, &size, &base)) {
     if (size > 0) {
+      vp = base;
       // The logic here resets the memory advice from being
       // GPU-centric to host-side preferred.  The general logic here
       // is to assume that host-side access suggests pending

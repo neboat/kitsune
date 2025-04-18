@@ -160,6 +160,7 @@ bool __kithip_is_mem_managed(void *vp) {
 void* __kithip_mem_gpu_prefetch(void *vp, void *opaque_stream) {
   assert(vp && "unexpected null pointer!");
   size_t size = 0;
+  void *base = nullptr;
 
   // TODO: Prefetching details and approaches need to be further
   // explored.  In particular, in concert with compiler analysis
@@ -173,7 +174,8 @@ void* __kithip_mem_gpu_prefetch(void *vp, void *opaque_stream) {
   // lead to page faults and evictions of pages...  At present this
   // has lead to the best general performance and reduced complexity,
   // while also maintaining correctness.
-  if (not __kitrt_is_mem_prefetched(vp, &size)) {
+  if (not __kitrt_is_mem_prefetched(vp, &size, &base)) {
+    vp = base;
     if (size > 0) {
       HIP_SAFE_CALL(hipMemAdvise_p(vp, size, hipMemAdviseSetPreferredLocation,
                                    __kithip_get_device_id()));
@@ -226,8 +228,10 @@ void __kithip_mem_host_prefetch(void *vp) {
   // faults and evictions.  Little work has been done with host-side
   // prefetch requests.
   size_t size;
-  if (__kitrt_is_mem_prefetched(vp, &size)) {
+  void *base;
+  if (__kitrt_is_mem_prefetched(vp, &size, &base)) {
     if (size > 0) {
+      vp = base;
       // The logic here resets the memory advice from being
       // GPU-centric to host-side preferred.  The logic is
       // to assume that host-side access suggests pending
