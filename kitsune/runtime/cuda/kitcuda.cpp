@@ -75,6 +75,7 @@ CUdevice _kitcuda_device = -1;
 CUcontext _kitcuda_context;
 
 extern size_t _kitcuda_big_block_threshold;
+extern size_t _kitcuda_memops_threshold;
 
 // TODO: We currently don't use these values within the runtime but
 // need to do so!
@@ -193,7 +194,7 @@ bool __kitcuda_initialize() {
             _kitcuda_major_compute_capability,
             _kitcuda_minor_compute_capability,
             _kitcuda_major_compute_capability * 10 +
-            _kitcuda_minor_compute_capability);
+                _kitcuda_minor_compute_capability);
     fprintf(stderr, "             warp size:        %d\n", _kitcuda_warp_size);
     fprintf(stderr, "             max threads/blk:  %d\n",
             _kitcuda_max_threads_per_blk);
@@ -239,6 +240,18 @@ bool __kitcuda_initialize() {
               _kitcuda_big_block_threshold);
   } else {
     _kitcuda_big_block_threshold = 4096; // 4KB
+  }
+
+  // If KITCUDA_MEMOPS_THRESHOLD is set, use it to set the threshold
+  if (__kitrt_get_env_value("KITCUDA_MEMOPS_THRESHOLD",
+                            _kitcuda_memops_threshold)) {
+    if (__kitrt_verbose_mode())
+      fprintf(stderr,
+              "  kitcuda: memory operations below %zu bytes will use glibc "
+              "version\n",
+              _kitcuda_memops_threshold);
+  } else {
+    _kitcuda_memops_threshold = 4096; // 4KB
   }
 
   __kitcuda_initialize_thread_streams();

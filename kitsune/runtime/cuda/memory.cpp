@@ -60,6 +60,7 @@ static std::mutex _kitcuda_mem_alloc_mutex;
 static kitrt::unordered_set<void *> _kitcuda_big_blocks;
 
 size_t _kitcuda_big_block_threshold = 4096;
+size_t _kitcuda_memops_threshold = 4096;
 
 struct ThreadLocalData {
   uintptr_t cur_block = 0;
@@ -530,7 +531,7 @@ void __kitcuda_destroy_reducer_cache() {
 
 void __kitcuda_memcpy(void *dst, void *src, size_t size) {
   // For now, just use the host memcpy.
-  if (size < 4096) {
+  if (size < _kitcuda_memops_threshold) {
     // Small memcpy, use the host memcpy anyways because a pagefault doesn't
     // hurt as much.
     memcpy(dst, src, size);
@@ -566,7 +567,7 @@ void __kitcuda_memmove(void *dst, void *src, size_t size) {
 }
 
 void __kitcuda_memset(void *dst, uint8_t value, size_t size) {
-  if (size < 4096) {
+  if (size < _kitcuda_memops_threshold) {
     memset(dst, value, size);
     return;
   }
