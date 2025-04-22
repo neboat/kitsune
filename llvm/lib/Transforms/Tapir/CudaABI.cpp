@@ -1051,13 +1051,6 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
           assert(Size > 0 && IdFn && MergeFn &&
                  "cuabi: reduction variable has invalid size, identity "
                  "function, or merge function");
-          if (Size > 8) {
-            // For now only support reduction variables with size <= 8, so they
-            // can be shuffled around with warp shuffles and accumulated to
-            // global memory through a CAS loop.
-            report_fatal_error("cuabi: reduction variable w/ size greater than "
-                               "8 is not supported for now");
-          }
           if (auto It = ReducedVars.find(Ptr); It != ReducedVars.end()) {
             ReductionVarInfo &Record = It->second;
             assert(Size == Record.Size && IdFn == Record.IdFn &&
@@ -1065,8 +1058,20 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
                    "cuabi: reduction variable has inconsistent "
                    "size, identity function, or merge function");
           } else {
-            Type *ReducerType =
-                Type::getIntNTy(KernelF->getContext(), bit_ceil(Size) * 8);
+            Type *ReducerType;
+            if (Size <= 8) {
+              // Use in-register integers for better performance.
+              ReducerType =
+                  Type::getIntNTy(KernelF->getContext(), bit_ceil(Size) * 8);
+            } else {
+              // Use array type for larger types. This is always correct.
+              // Backend may of course optimize it into registers
+              // Use int32 instead of int8 because that's the native type for
+              // CUDA
+              size_t NumI32s = (Size + sizeof(int32_t) - 1) / sizeof(int32_t);
+              ReducerType = ArrayType::get(
+                  Type::getInt32Ty(KernelF->getContext()), NumI32s);
+            }
             ReductionVarInfo Record = {nullptr,     Size, IdFn,   MergeFn,
                                        ReducerType, {},   nullptr};
             ReducedVars[Ptr] = Record;
@@ -1174,32 +1179,55 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
       for (size_t Delta = 1; Delta < Size; Delta *= 2) {
         std::string LoopName = Prefix + "_reduce_" + std::to_string(Delta);
         for (auto [Ptr, Info] : ReducedVars) {
+          AllocaInst *DownAlloca = B.CreateAlloca(Info.Type);
           // Do a warp shuffle down
-          Value *DownResult = nullptr;
-          Value *LocalValue = B.CreateLoad(Info.Type, Info.LocalPtr);
-          for (size_t Offset = 0; Offset < Info.Size; Offset += 4) {
-            Value *ToShuffle = B.CreateTrunc(
-                B.CreateLShr(LocalValue,
-                             ConstantInt::get(Info.Type, Offset * 8)),
-                Int32Ty);
-            // Call the __shfl_down_sync intrinsic
-            Value *Shuffled =
-                B.CreateIntrinsic(Intrinsic::nvvm_shfl_sync_down_i32, {},
-                                  {ConstantInt::get(Int32Ty, Mask), ToShuffle,
-                                   ConstantInt::get(Int32Ty, Delta),
-                                   ConstantInt::get(Int32Ty, WarpSize - 1)});
-            Shuffled =
-                B.CreateCast(Instruction::CastOps::ZExt, Shuffled, Info.Type);
-            if (!DownResult) {
-              DownResult = Shuffled;
+          Constant *MaskArg = ConstantInt::get(Int32Ty, Mask);
+          Constant *DeltaArg = ConstantInt::get(Int32Ty, Delta);
+          Constant *WarpSizeArg = ConstantInt::get(Int32Ty, WarpSize - 1);
+          const auto WarpShuffleDown = [&](Value *V) {
+            return B.CreateIntrinsic(Intrinsic::nvvm_shfl_sync_down_i32, {},
+                                     {MaskArg, V, DeltaArg, WarpSizeArg});
+          };
+          if (Info.Type->isIntegerTy()) {
+            // Use warp shuffle intrinsic
+            Value *DownResult = nullptr;
+            Value *LocalValue = B.CreateLoad(Info.Type, Info.LocalPtr);
+            dbgs() << "cuabi: warp shuffle down " << *LocalValue
+                   << " with Info.Size = " << Info.Size << "\n";
+            if (Info.Size <= 4) {
+              Value *ToShuffle =
+                  B.CreateCast(Instruction::CastOps::ZExt, LocalValue, Int32Ty);
+              DownResult = B.CreateTrunc(WarpShuffleDown(ToShuffle), Info.Type);
             } else {
+              assert(bit_ceil(Info.Size) == 8);
+              Value *ToShuffleLow = B.CreateTrunc(LocalValue, Int32Ty);
+              Value *ToShuffleHigh = B.CreateTrunc(
+                  B.CreateLShr(LocalValue, ConstantInt::get(Info.Type, 32)),
+                  Int32Ty);
+              Value *ShuffledLow =
+                  B.CreateCast(Instruction::CastOps::ZExt,
+                               WarpShuffleDown(ToShuffleLow), Info.Type);
+              Value *ShuffledHigh =
+                  B.CreateCast(Instruction::CastOps::ZExt,
+                               WarpShuffleDown(ToShuffleHigh), Info.Type);
               DownResult = B.CreateOr(
-                  DownResult,
-                  B.CreateShl(Shuffled,
-                              ConstantInt::get(Info.Type, Offset * 8)));
-              if (auto *Or = dyn_cast<PossiblyDisjointInst>(DownResult)) {
-                Or->setIsDisjoint(true);
-              }
+                  B.CreateShl(ShuffledHigh, ConstantInt::get(Info.Type, 32)),
+                  ShuffledLow);
+            }
+            B.CreateStore(DownResult, DownAlloca);
+          } else {
+            assert(Info.Type->isArrayTy() &&
+                   Info.Type->getArrayElementType()->isIntegerTy(32));
+            // Reference:
+            // https://github.com/NVIDIA/cub/blob/0fc3c3701632a4be906765b73be20a9ad0da603d/cub/util_ptx.cuh#L615
+            for (size_t Idx = 0; Idx < Info.Type->getArrayNumElements();
+                 Idx++) {
+              Value *LocalWord =
+                  B.CreateLoad(Int32Ty, B.CreateConstInBoundsGEP2_32(
+                                            Info.Type, Info.LocalPtr, 0, Idx));
+              Value *Shuffled = WarpShuffleDown(LocalWord);
+              B.CreateStore(Shuffled, B.CreateConstInBoundsGEP2_32(
+                                          Info.Type, DownAlloca, 0, Idx));
             }
           }
           // Brent-Kung reduction
@@ -1221,8 +1249,6 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
           B.CreateCondBr(Cond, ThenBB, MergeBB);
           B.SetInsertPoint(ThenBB);
           {
-            AllocaInst *DownAlloca = B.CreateAlloca(Info.Type);
-            B.CreateStore(DownResult, DownAlloca);
             // Call the merge function
             CallInst *MergeCall =
                 B.CreateCall(Info.MergeFn, {Info.LocalPtr, DownAlloca});
@@ -1251,8 +1277,27 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
           B.CreateUDiv(ThreadIdx, ConstantInt::get(Int32Ty, WarpSize));
       // SharedPtr[WarpIdx] = *LocalPtr
       for (auto [Ptr, Info] : ReducedVars) {
-        Value *StorePtr = B.CreateGEP(Info.Type, Info.SharedPtr, WarpIdx);
-        B.CreateStore(B.CreateLoad(Info.Type, Info.LocalPtr), StorePtr);
+        if (Info.Type->isIntegerTy()) {
+          Value *StorePtr =
+              B.CreateInBoundsGEP(Info.Type, Info.SharedPtr, WarpIdx);
+          B.CreateStore(B.CreateLoad(Info.Type, Info.LocalPtr), StorePtr);
+        } else {
+          Type *WarpArrayTy = ArrayType::get(
+              Type::getInt32Ty(KernelF->getContext()), MaxNumWarps);
+          for (size_t Idx = 0; Idx < Info.Type->getArrayNumElements(); Idx++) {
+            Value *LocalWord = B.CreateLoad(
+                Int32Ty,
+                B.CreateConstInBoundsGEP2_32(Info.Type, Info.LocalPtr, 0, Idx));
+            // Actually write to shared[idx][warpIdx] instead of
+            // shared[warpIdx][idx] So subsequent read is free of bank
+            // conflicts. We don't have write bank conflicts either way because
+            // only one thread per warp does this write.
+            Value *StorePtr =
+                B.CreateInBoundsGEP(WarpArrayTy, Info.SharedPtr,
+                                    {ConstantInt::get(Int32Ty, Idx), WarpIdx});
+            B.CreateStore(LocalWord, StorePtr);
+          }
+        }
       }
       B.CreateBr(AfterStoreBB);
     }
@@ -1291,8 +1336,23 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
       {
         // *LocalPtr = SharedPtr[threadIdx]
         for (auto [Ptr, Info] : ReducedVars) {
-          Value *SHMemPtr = B.CreateGEP(Info.Type, Info.SharedPtr, ThreadIdx);
-          B.CreateStore(B.CreateLoad(Info.Type, SHMemPtr), Info.LocalPtr);
+          if (Info.Type->isIntegerTy()) {
+            Value *SHMemPtr =
+                B.CreateInBoundsGEP(Info.Type, Info.SharedPtr, ThreadIdx);
+            B.CreateStore(B.CreateLoad(Info.Type, SHMemPtr), Info.LocalPtr);
+          } else {
+            Type *WarpArrayTy = ArrayType::get(
+                Type::getInt32Ty(KernelF->getContext()), MaxNumWarps);
+            for (size_t Idx = 0; Idx < Info.Type->getArrayNumElements();
+                 Idx++) {
+              Value *SHMemWord = B.CreateInBoundsGEP(
+                  WarpArrayTy, Info.SharedPtr,
+                  {ConstantInt::get(Int32Ty, Idx), ThreadIdx});
+              B.CreateStore(B.CreateLoad(Int32Ty, SHMemWord),
+                            B.CreateConstInBoundsGEP2_32(
+                                Info.Type, Info.LocalPtr, 0, Idx));
+            }
+          }
         }
         B.CreateBr(StartReduceBB);
       }
@@ -1321,37 +1381,69 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
     B.SetInsertPoint(WriteToGlobalBB);
     {
       for (auto [Ptr, Info] : ReducedVars) {
-        // Write a CAS loop to write the local copy to global memory
-        Value *OldPtr = B.CreateAlloca(Info.Type);
-        Value *NewPtr = B.CreateAlloca(Info.Type);
-        BasicBlock *LoopBB = BasicBlock::Create(
-            KernelF->getContext(),
-            "blk_reduce_write_loop_" + Ptr->getName().str(), KernelF);
-        BasicBlock *DoneBB = BasicBlock::Create(
-            KernelF->getContext(),
-            "blk_reduce_write_done_" + Ptr->getName().str(), KernelF);
-        LoadInst *LoadedOldVal = B.CreateLoad(Info.Type, Ptr);
-        // LoadedOldVal->setAtomic(AtomicOrdering::SequentiallyConsistent);
-        BasicBlock *PrevBlock = B.GetInsertBlock();
-        B.CreateBr(LoopBB);
-        B.SetInsertPoint(LoopBB);
-        {
-          PHINode *OldVal = B.CreatePHI(Info.Type, 2);
-          B.CreateStore(OldVal, OldPtr);
-          B.CreateStore(B.CreateLoad(Info.Type, Info.LocalPtr), NewPtr);
-          CallInst *MergeCall = B.CreateCall(Info.MergeFn, {NewPtr, OldPtr});
+        if (Info.Type->isIntegerTy()) {
+          // Write a CAS loop to write the local copy to global memory
+          Value *OldPtr = B.CreateAlloca(Info.Type);
+          Value *NewPtr = B.CreateAlloca(Info.Type);
+          BasicBlock *LoopBB = BasicBlock::Create(
+              KernelF->getContext(),
+              "blk_reduce_write_loop_" + Ptr->getName().str(), KernelF);
+          BasicBlock *DoneBB = BasicBlock::Create(
+              KernelF->getContext(),
+              "blk_reduce_write_done_" + Ptr->getName().str(), KernelF);
+          LoadInst *LoadedOldVal = B.CreateLoad(Info.Type, Ptr);
+          // LoadedOldVal->setAtomic(AtomicOrdering::SequentiallyConsistent);
+          BasicBlock *PrevBlock = B.GetInsertBlock();
+          B.CreateBr(LoopBB);
+          B.SetInsertPoint(LoopBB);
+          {
+            PHINode *OldVal = B.CreatePHI(Info.Type, 2);
+            B.CreateStore(OldVal, OldPtr);
+            B.CreateStore(B.CreateLoad(Info.Type, Info.LocalPtr), NewPtr);
+            CallInst *MergeCall = B.CreateCall(Info.MergeFn, {NewPtr, OldPtr});
+            MergeCall->setDebugLoc(FirstAndLastLoc.second);
+            Value *CASResult = B.CreateAtomicCmpXchg(
+                Ptr, OldVal, B.CreateLoad(Info.Type, NewPtr),
+                MaybeAlign(Info.Size), AtomicOrdering::SequentiallyConsistent,
+                AtomicOrdering::SequentiallyConsistent);
+            Value *CASOldVal = B.CreateExtractValue(CASResult, 0);
+            Value *CASSuccess = B.CreateExtractValue(CASResult, 1);
+            OldVal->addIncoming(CASOldVal, LoopBB);
+            OldVal->addIncoming(LoadedOldVal, PrevBlock);
+            B.CreateCondBr(CASSuccess, DoneBB, LoopBB);
+          }
+          B.SetInsertPoint(DoneBB);
+        } else {
+          // If aggregate type, it's tricky. Atomic CAS will not work. But
+          // host-side will allocate a mutex right after the global view.
+          Value *MutexPtr = B.CreateConstGEP1_32(
+              Int32Ty, Ptr, Info.Type->getArrayNumElements());
+          BasicBlock *LoopBB = BasicBlock::Create(
+              KernelF->getContext(),
+              "blk_reduce_mutex_loop_" + Ptr->getName().str(), KernelF);
+          BasicBlock *DoneBB = BasicBlock::Create(
+              KernelF->getContext(),
+              "blk_reduce_mutex_done_" + Ptr->getName().str(), KernelF);
+          B.CreateBr(LoopBB);
+          B.SetInsertPoint(LoopBB);
+          { // Loop to acquire the mutex
+            Value *CASResult = B.CreateAtomicCmpXchg(
+                MutexPtr, ConstantInt::get(Int32Ty, 0),
+                ConstantInt::get(Int32Ty, 1), MaybeAlign(4),
+                AtomicOrdering::SequentiallyConsistent,
+                AtomicOrdering::SequentiallyConsistent);
+            Value *CASSuccess = B.CreateExtractValue(CASResult, 1);
+            B.CreateCondBr(CASSuccess, DoneBB, LoopBB);
+          }
+          B.SetInsertPoint(DoneBB);
+          B.CreateIntrinsic(Intrinsic::nvvm_membar_gl, {}, {});
+          CallInst *MergeCall =
+              B.CreateCall(Info.MergeFn, {Ptr, Info.LocalPtr});
           MergeCall->setDebugLoc(FirstAndLastLoc.second);
-          Value *CASResult = B.CreateAtomicCmpXchg(
-              Ptr, OldVal, B.CreateLoad(Info.Type, NewPtr),
-              MaybeAlign(Info.Size), AtomicOrdering::SequentiallyConsistent,
-              AtomicOrdering::SequentiallyConsistent);
-          Value *CASOldVal = B.CreateExtractValue(CASResult, 0);
-          Value *CASSuccess = B.CreateExtractValue(CASResult, 1);
-          OldVal->addIncoming(CASOldVal, LoopBB);
-          OldVal->addIncoming(LoadedOldVal, PrevBlock);
-          B.CreateCondBr(CASSuccess, DoneBB, LoopBB);
+          B.CreateIntrinsic(Intrinsic::nvvm_membar_gl, {}, {});
+          // Release the mutex
+          B.CreateStore(ConstantInt::get(Int32Ty, 0), MutexPtr);
         }
-        B.SetInsertPoint(DoneBB);
       }
       B.CreateBr(ExitBB);
     }
@@ -1610,9 +1702,14 @@ void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
               });
     size_t ViewSize = 0;
     for (auto &[V, Info] : SortedReducerInputs) {
-      size_t Alignment = bit_ceil(Info.Size);
+      size_t Alignment = std::min(bit_ceil(Info.Size), size_t{8});
       ViewSize = (ViewSize + Alignment - 1) & -Alignment;
       ViewSize += Info.Size;
+      if (Info.Size > 8) {
+        ViewSize = (ViewSize + 3) & -4;
+        // Extra 4 bytes for the mutex
+        ViewSize += 4;
+      }
     }
     LaunchInfo.ViewSize = ViewSize;
 
@@ -1636,7 +1733,7 @@ void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
     IRBuilder<> PreCopyBuilder(NewSPtr);
     ViewSize = 0;
     for (auto &[V, Info] : SortedReducerInputs) {
-      size_t Alignment = bit_ceil(Info.Size);
+      size_t Alignment = std::min(bit_ceil(Info.Size), size_t{8});
       ViewSize = (ViewSize + Alignment - 1) & -Alignment;
       Value *HostViewPtr = EntryBuilder.CreateConstInBoundsGEP2_32(
           ViewTy, HostViewBasePtr, 0, ViewSize);
@@ -1647,6 +1744,14 @@ void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
                                          Info.Size, Info.IdFn, Info.MergeFn});
       DeviceReducerViews[V] = DeviceViewPtr;
       ViewSize += Info.Size;
+      if (Info.Size > 8) {
+        ViewSize = (ViewSize + 3) & -4;
+        // Extra 4 bytes for the mutex
+        PreCopyBuilder.CreateStore(ConstantInt::get(Type::getInt32Ty(Ctx), 0),
+                                   EntryBuilder.CreateConstInBoundsGEP2_32(
+                                       ViewTy, HostViewBasePtr, 0, ViewSize));
+        ViewSize += 4;
+      }
     }
   }
 
