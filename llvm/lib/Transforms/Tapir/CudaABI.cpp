@@ -64,6 +64,7 @@
 #include "llvm/ADT/Twine.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/FMF.h"
 #include "llvm/IR/GlobalVariable.h"
@@ -2744,6 +2745,41 @@ void CudaABI::registerFatbinary(GlobalVariable *Fatbinary) {
   }
 }
 
+namespace {
+
+// NVPTX backend does not lower LLVM fence instructions properly.  See
+// https://github.com/llvm/llvm-project/issues/61411 We fix it by replacing
+// fence instructions with membar.gl (__threadfence).  This is always correct,
+// because __threadfence has seqcst semantics, not weaker than any fence.
+void fixFencesAndAtomics(Module &KernelModule) {
+  for (Function &F : KernelModule) {
+    SmallVector<FenceInst *> Fences;
+    for (Instruction &I : instructions(F)) {
+      if (FenceInst *FI = dyn_cast<FenceInst>(&I)) {
+        Fences.push_back(FI);
+      } else if (StoreInst *SI = dyn_cast<StoreInst>(&I)) {
+        if (SI->isAtomic()) {
+          // Mark it as not atomic.
+          // TODO: maybe make it into an atomicCAS is more appropriate?
+          SI->setAtomic(AtomicOrdering::NotAtomic);
+        }
+      }
+    }
+    for (FenceInst *FI : Fences) {
+      IRBuilder<> Builder(FI);
+      Value *MemBar =
+          Builder.CreateIntrinsic(Intrinsic::nvvm_membar_gl, {}, {});
+      LLVM_DEBUG(dbgs() << "\t\t\t* replacing fence with membar.gl: " << *FI
+                        << "\n");
+      FI->replaceAllUsesWith(MemBar);
+      // TODO: copy over debug info?
+      FI->eraseFromParent();
+    }
+  }
+}
+
+} // namespace
+
 CudaABIOutputFile CudaABI::generatePTX() {
 
   LLVM_DEBUG(dbgs() << "\t- generating PTX...\n");
@@ -2842,6 +2878,9 @@ CudaABIOutputFile CudaABI::generatePTX() {
                                                    ".postopt.LTO.ll"));
   }
 
+  // Fixup thread fence instructions.
+  fixFencesAndAtomics(KernelModule);
+
   // PTXAS does not support optimized debug info. Practically, this means
   // DICompileUnit::FullDebug and DICompileUnit::LineTablesOnly do not work. But
   // DICompileUnit::DebugDirectivesOnly does and it's good enough (you get to
@@ -2860,6 +2899,10 @@ CudaABIOutputFile CudaABI::generatePTX() {
       break;
     }
   }
+
+  // Hack: strip debug symbols because apparently some NVPTX internal lowering
+  // passes handle them incorrectly... Don't have time to fix NVPTX internals.
+  StripDebugInfo(KernelModule);
 
   // Setup the passes and request that the output goes to the
   // specified PTX file.
