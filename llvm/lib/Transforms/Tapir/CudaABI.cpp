@@ -2080,6 +2080,7 @@ CudaABIOutputFile CudaABI::assemblePTXFile(CudaABIOutputFile &PTXFile) {
   std::unique_ptr<ToolOutputFile> AsmFile;
   AsmFile = std::make_unique<ToolOutputFile>(AsmFileName, EC,
                                              sys::fs::OpenFlags::OF_None);
+  pushPTXFilename(PTXFile->getFilename().str());
 
   // Build the command line for ptxas...  There are some target specific options
   // that we support to configure some specifics here.  See the 'opt' entries
