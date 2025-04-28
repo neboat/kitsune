@@ -55,11 +55,11 @@
 #include <cstdio>
 #include <mutex>
 
-#include <boost/intrusive/splay_set.hpp>
+#include <boost/intrusive/set.hpp>
 
 using namespace boost::intrusive;
 
-struct KitRTAllocMapEntry : public bs_set_base_hook<> {
+struct KitRTAllocMapEntry : public set_base_hook<optimize_size<true>> {
   void *base;      // base address of the allocation.
   size_t size;     // size of the allocated buffer in bytes.
   bool prefetched; // has the data been prefetched?
@@ -81,9 +81,9 @@ struct KitRTAllocMapEntry : public bs_set_base_hook<> {
 };
 
 // Metadata is ordered by decreasing base address.
-typedef splay_set<KitRTAllocMapEntry> KitRTAllocMap;
+typedef set<KitRTAllocMapEntry> KitRTAllocMap;
 static KitRTAllocMap _kitrt_alloc_map;
-static std::mutex _kitrt_alloc_map_mutex;
+static std::shared_mutex _kitrt_alloc_map_mutex;
 
 static KitRTAllocMapEntry *__kitrt_memory_map_lookup(void *addr) {
   // Find the highest base address that is less than or equal to the given
@@ -129,16 +129,16 @@ void __kitrt_register_mem_alloc(void *addr, size_t size) {
 
 void __kitrt_set_mem_prefetch(void *addr, bool prefetched) {
   assert(addr != nullptr && "unexpected null pointer!");
-  _kitrt_alloc_map_mutex.lock();
+  _kitrt_alloc_map_mutex.lock_shared();
   KitRTAllocMapEntry *entry = __kitrt_memory_map_lookup(addr);
   if (entry != nullptr) {
     entry->prefetched = prefetched;
-    _kitrt_alloc_map_mutex.unlock();
+    _kitrt_alloc_map_mutex.unlock_shared();
     if (__kitrt_verbose_mode())
       fprintf(stderr, "kitrt: marked memory at %p, size %ld, as '%s'.\n", addr,
               entry->size, prefetched ? "prefetched" : "not prefetched");
   } else {
-    _kitrt_alloc_map_mutex.unlock();
+    _kitrt_alloc_map_mutex.unlock_shared();
   }
   // We could consider a diagnostic here reporting use of an unregistered
   // pointer.  However, this is tricky with the compiler generating calls
@@ -151,20 +151,20 @@ void __kitrt_set_mem_prefetch(void *addr, bool prefetched) {
 
 void __kitrt_mark_mem_read_only(void *addr) {
   assert(addr != nullptr && "unexpected null pointer!");
-  _kitrt_alloc_map_mutex.lock();
+  _kitrt_alloc_map_mutex.lock_shared();
   KitRTAllocMapEntry *entry = __kitrt_memory_map_lookup(addr);
   if (entry != nullptr) {
     entry->read_only = true;
   }
-  _kitrt_alloc_map_mutex.unlock();
+  _kitrt_alloc_map_mutex.unlock_shared();
 }
 
 bool __kitrt_is_mem_read_only(void *addr) {
   assert(addr != nullptr && "unexpected null pointer!");
-  _kitrt_alloc_map_mutex.lock();
+  _kitrt_alloc_map_mutex.lock_shared();
   KitRTAllocMapEntry *entry = __kitrt_memory_map_lookup(addr);
   bool ret = entry != nullptr ? entry->read_only : false;
-  _kitrt_alloc_map_mutex.unlock();
+  _kitrt_alloc_map_mutex.unlock_shared();
   return ret;
 }
 
@@ -172,38 +172,38 @@ bool __kitrt_is_mem_read_only(void *addr) {
 /// @param addr: the pointer to the managed memory allocation. 
 extern void __kitrt_mark_mem_write_only(void *addr) {
   assert(addr != nullptr && "unexpected null pointer!");
-  _kitrt_alloc_map_mutex.lock();
+  _kitrt_alloc_map_mutex.lock_shared();
   KitRTAllocMapEntry *entry = __kitrt_memory_map_lookup(addr);
   if (entry != nullptr) {
     entry->write_only = true;
   }
-  _kitrt_alloc_map_mutex.unlock();
+  _kitrt_alloc_map_mutex.unlock_shared();
 }
 
 
 bool __kitrt_is_mem_write_only(void *addr) {
   assert(addr != nullptr && "unexpected null pointer!");
-  _kitrt_alloc_map_mutex.lock();
+  _kitrt_alloc_map_mutex.lock_shared();
   KitRTAllocMapEntry *entry = __kitrt_memory_map_lookup(addr);
   bool ret = entry != nullptr ? entry->write_only : false;
-  _kitrt_alloc_map_mutex.unlock();
+  _kitrt_alloc_map_mutex.unlock_shared();
   return ret;
 }
 
 void __kitrt_clear_mem_advice(void *addr) {
   assert(addr != nullptr && "unexpected null pointer!");
-  _kitrt_alloc_map_mutex.lock();
+  _kitrt_alloc_map_mutex.lock_shared();
   KitRTAllocMapEntry *entry = __kitrt_memory_map_lookup(addr);
   if (entry != nullptr) {
     entry->read_only = false;
     entry->write_only = false;
   }
-  _kitrt_alloc_map_mutex.unlock();
+  _kitrt_alloc_map_mutex.unlock_shared();
 }
 
 bool __kitrt_is_mem_prefetched(void *addr, size_t *size, void **base) {
   assert(addr != nullptr && "unexpected null pointer!");
-  _kitrt_alloc_map_mutex.lock();
+  _kitrt_alloc_map_mutex.lock_shared();
   KitRTAllocMapEntry *entry = __kitrt_memory_map_lookup(addr);
   bool prefetched = true;
   if (entry != nullptr) {
@@ -223,7 +223,7 @@ bool __kitrt_is_mem_prefetched(void *addr, size_t *size, void **base) {
     // the pointer).
     prefetched = true;
   }
-  _kitrt_alloc_map_mutex.unlock();
+  _kitrt_alloc_map_mutex.unlock_shared();
   return prefetched;
 }
 
@@ -232,7 +232,7 @@ size_t __kitrt_get_mem_alloc_size(void *addr, bool *read_only,
   assert(addr != nullptr && "unexpected null addr pointer!");
   assert(read_only != nullptr && "unexpected null read_only pointer!");
   assert(write_only != nullptr && "unexpected null write_only pointer!");
-  _kitrt_alloc_map_mutex.lock();
+  _kitrt_alloc_map_mutex.lock_shared();
   size_t size = 0;
   KitRTAllocMapEntry *entry = __kitrt_memory_map_lookup(addr);
   if (entry != nullptr && addr == entry->base) {
@@ -243,7 +243,7 @@ size_t __kitrt_get_mem_alloc_size(void *addr, bool *read_only,
     *read_only = false;
     *write_only = false;
   }
-  _kitrt_alloc_map_mutex.unlock();
+  _kitrt_alloc_map_mutex.unlock_shared();
 
   return size;
 }
@@ -261,12 +261,12 @@ void __kitrt_unregister_mem_alloc(void *addr) {
 
 void __kitrt_mem_needs_prefetch(void *addr) {
   assert(addr != nullptr && "unexpected null pointer!");
-  _kitrt_alloc_map_mutex.lock();
+  _kitrt_alloc_map_mutex.lock_shared();
   KitRTAllocMapEntry *entry = __kitrt_memory_map_lookup(addr);
   if (entry != nullptr) {
     entry->prefetched = false;
   }
-  _kitrt_alloc_map_mutex.unlock();
+  _kitrt_alloc_map_mutex.unlock_shared();
 }
 
 extern "C" void __kitrt_print_memory_map() {
