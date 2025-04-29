@@ -243,6 +243,11 @@ cl::opt<bool>
             cl::desc("Enable verbose mode for cuda toolchain components. "
                      "(default=false)"));
 
+cl::opt<bool> DontFuseReducers(
+    "cuabi-dont-fuse-reducers", cl::init(false), cl::NotHidden,
+    cl::desc("Generate separate reduction trees for each reducer. "
+             "(default=false)"));
+
 cl::opt<bool>
     EmbedPTXInFatbinaries("cuabi-embed-ptx", cl::init(false), cl::Hidden,
                           cl::desc("Embed intermediate PTX files in the "
@@ -1167,19 +1172,33 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
     }
   }
   // Now generate reduction code at exit block
-  {
-    // Remove the existing terminator for now
-    Exit->getTerminator()->eraseFromParent();
-    IRBuilder<> B(Exit);
-    Type *Int32Ty = Type::getInt32Ty(KernelF->getContext());
-    Value *LaneIdx =
-        B.CreateAnd(ThreadIdx, ConstantInt::get(Int32Ty, WarpSize - 1));
+  IRBuilder<> B(Exit);
+  // Remove the existing terminator for now
+  Exit->getTerminator()->eraseFromParent();
+  Type *Int32Ty = Type::getInt32Ty(KernelF->getContext());
+  Value *LaneIdx =
+      B.CreateAnd(ThreadIdx, ConstantInt::get(Int32Ty, WarpSize - 1));
+
+  SmallVector<std::vector<std::pair<Value *, ReductionVarInfo>>, 8>
+      ReductionTrees;
+  if (DontFuseReducers) {
+    for (auto [Ptr, Info] : ReducedVars) {
+      ReductionTrees.emplace_back();
+      ReductionTrees.back().emplace_back(Ptr, Info);
+    }
+  } else {
+    ReductionTrees.emplace_back();
+    for (auto [Ptr, Info] : ReducedVars)
+      ReductionTrees.back().emplace_back(Ptr, Info);
+  }
+
+  for (const auto &CurReducedVars : ReductionTrees) {
     // Let's do a warp-wide reduction first
     const auto TreeReduce = [&](std::string Prefix, size_t Size) {
       const size_t Mask = (1ULL << Size) - 1;
       for (size_t Delta = 1; Delta < Size; Delta *= 2) {
         std::string LoopName = Prefix + "_reduce_" + std::to_string(Delta);
-        for (auto [Ptr, Info] : ReducedVars) {
+        for (auto &[Ptr, Info] : CurReducedVars) {
           AllocaInst *DownAlloca = B.CreateAlloca(Info.Type);
           // Do a warp shuffle down
           Constant *MaskArg = ConstantInt::get(Int32Ty, Mask);
@@ -1277,7 +1296,7 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
       Value *WarpIdx =
           B.CreateUDiv(ThreadIdx, ConstantInt::get(Int32Ty, WarpSize));
       // SharedPtr[WarpIdx] = *LocalPtr
-      for (auto [Ptr, Info] : ReducedVars) {
+      for (auto &[Ptr, Info] : CurReducedVars) {
         if (Info.Type->isIntegerTy()) {
           Value *StorePtr =
               B.CreateInBoundsGEP(Info.Type, Info.SharedPtr, WarpIdx);
@@ -1291,8 +1310,8 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
                 B.CreateConstInBoundsGEP2_32(Info.Type, Info.LocalPtr, 0, Idx));
             // Actually write to shared[idx][warpIdx] instead of
             // shared[warpIdx][idx] So subsequent read is free of bank
-            // conflicts. We don't have write bank conflicts either way because
-            // only one thread per warp does this write.
+            // conflicts. We don't have write bank conflicts either way
+            // because only one thread per warp does this write.
             Value *StorePtr =
                 B.CreateInBoundsGEP(WarpArrayTy, Info.SharedPtr,
                                     {ConstantInt::get(Int32Ty, Idx), WarpIdx});
@@ -1336,7 +1355,7 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
       B.SetInsertPoint(LoadFromSHMemBB);
       {
         // *LocalPtr = SharedPtr[threadIdx]
-        for (auto [Ptr, Info] : ReducedVars) {
+        for (auto &[Ptr, Info] : CurReducedVars) {
           if (Info.Type->isIntegerTy()) {
             Value *SHMemPtr =
                 B.CreateInBoundsGEP(Info.Type, Info.SharedPtr, ThreadIdx);
@@ -1360,7 +1379,7 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
       B.SetInsertPoint(InitIdBB);
       {
         // Identity(*LocalPtr)
-        for (auto [Ptr, Info] : ReducedVars) {
+        for (auto &[Ptr, Info] : CurReducedVars) {
           CallInst *IdCall = B.CreateCall(Info.IdFn, {Info.LocalPtr});
           IdCall->setDebugLoc(FirstAndLastLoc.second);
         }
@@ -1381,7 +1400,7 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
     B.CreateCondBr(CondBlockLeader, WriteToGlobalBB, ExitBB);
     B.SetInsertPoint(WriteToGlobalBB);
     {
-      for (auto [Ptr, Info] : ReducedVars) {
+      for (auto &[Ptr, Info] : CurReducedVars) {
         if (Info.Type->isIntegerTy()) {
           // Write a CAS loop to write the local copy to global memory
           Value *OldPtr = B.CreateAlloca(Info.Type);
@@ -1449,8 +1468,8 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
       B.CreateBr(ExitBB);
     }
     B.SetInsertPoint(ExitBB);
-    B.CreateRetVoid();
   }
+  B.CreateRetVoid();
 }
 
 Function *CudaLoop::resolveLibDeviceFunction(Function *Fn, bool enableFast) {
