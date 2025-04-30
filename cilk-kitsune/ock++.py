@@ -170,6 +170,8 @@ class Invocation:
                     logging.warning("Warning: -O0 is not supported")
                 elif ret.opt_level < 0 or ret.opt_level > 3:
                     raise ValueError(f"Invalid optimization level: {ret.opt_level}")
+            elif arg.startswith("--cuabi"):
+                ret.opt_args.append(arg)
             elif arg == "--debug":
                 ret.debug = True
             elif not arg.startswith("-"):
@@ -331,6 +333,7 @@ class Invocation:
                 "--tapir-target=opencilk",
                 "--use-opencilk-runtime-bc",
                 f"--opencilk-runtime-bc-path={self.kitsune_path}/lib/clang/19/lib/x86_64-unknown-linux-gnu/libopencilk-abi.bc",
+                "--cuabi-embed-ptx",
                 # *debug_flags,
                 "-S",
                 self.llvm_ir_output_file,
@@ -448,61 +451,6 @@ class Invocation:
                 *self.linker_args,
             ],
             f"Kitsune compiler compiled to {output_file}",
-            print_cmd=True,
-        )
-
-    def override_and_localize_symbols(
-        self, obj_files: list[Path], output_obj_file: Path
-    ) -> None:
-        _run_command(
-            [
-                f"{self.kitsune_path}/bin/kit++",
-                "-g",  # Pass on debug info
-                *obj_files,
-                self.kitmalloc_path,
-                "-Wl,--wrap,malloc",
-                "-Wl,--wrap,free",
-                "-Wl,--wrap,calloc",
-                "-Wl,--wrap,realloc",
-                "-r",
-                "-nostartfiles",
-                "-nostdlib",
-                "-nodefaultlibs",
-                "-o",
-                output_obj_file,
-            ],
-            f"Kitsune compiler compiled to {output_obj_file}",
-            print_cmd=True,
-        )
-
-        hiding_syms = [
-            "__wrap_malloc",
-            "__wrap_free",
-            "__wrap_calloc",
-            "__wrap_realloc",
-            "_ZdaPv",
-            "_ZdaPvm",
-            "_ZdaPvmSt11align_val_t",
-            "_ZdaPvSt11align_val_t",
-            "_ZdlPv",
-            "_ZdlPvm",
-            "_ZdlPvmSt11align_val_t",
-            "_ZdlPvSt11align_val_t",
-            "_Znam",
-            "_ZnamSt11align_val_t",
-            "_Znwm",
-            "_ZnwmSt11align_val_t",
-        ]
-        _run_command(
-            [
-                f"{self.kitsune_path}/bin/llvm-objcopy",
-                *sum(
-                    (["--localize-symbol", sym] for sym in hiding_syms),
-                    [],
-                ),
-                output_obj_file,
-            ],
-            f"Kitsune compiler objcopyed {output_obj_file}",
             print_cmd=True,
         )
 
