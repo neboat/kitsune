@@ -405,6 +405,7 @@ class Invocation:
 
         kitrt_dir = f"{self.kitsune_path}/lib/clang/19/lib"
         opencilk_dir = f"{self.kitsune_path}/lib/clang/19/lib/x86_64-unknown-linux-gnu"
+        cuda_home = os.environ.get("CUDA_HOME", "/opt/cuda")
 
         self._run_command(
             [
@@ -414,8 +415,8 @@ class Invocation:
                 f"-O{self.opt_level}",
                 *self.linker_args,
                 # Link in CUDA runtime
-                "-L/opt/cuda/lib64",
-                "-Wl,-rpath,/opt/cuda/lib64",
+                f"-L{cuda_home}/lib64",
+                f"-Wl,-rpath,{cuda_home}/lib64",
                 "-lcudart",
                 # Link in OpenCilk runtime
                 f"-L{opencilk_dir}",
