@@ -1250,9 +1250,10 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
                                           Info.Type, DownAlloca, 0, Idx));
             }
           }
-          // Brent-Kung reduction
+          // Brent-Kung reduction -- theoretically more work efficient, but not
+          // in practice due to warp divergence. So we use Kogge-Stone instead.
           // Value *Cond = B.CreateICmpEQ(
-          //     B.CreateAnd(LaneIdx, ConstantInt::get(Int32Ty, 2 * Delta)),
+          //     B.CreateAnd(LaneIdx, ConstantInt::get(Int32Ty, 2 * Delta - 1)),
           //     ConstantInt::get(Int32Ty, 0));
           // Kogge-Stone reduction
           Value *Cond = B.CreateICmpULT(
