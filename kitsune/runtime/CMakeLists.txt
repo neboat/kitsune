@@ -26,6 +26,7 @@ option(KITRT_ENABLE_DEBUG "Enable debug mode features for the runtime." OFF)
 option(KITRT_ENABLE_VERBOSE "Enable verbose execution mode for debugging." OFF)
 
 option(KITCUDA_ENABLE_NVTX "Enable NVTX profiling within the runtime" OFF)
+set(KITCUDA_BITCODE_ARCH "sm_80" CACHE STRING "CUDA architecture for bitcode generation")
 
 # Common headers and source files.
 set(KITRT_HDRS
@@ -125,6 +126,40 @@ if (KITSUNE_CUDA_ENABLED)
 
     target_link_libraries(${KITRT} PUBLIC ${LIB_NVTOOLS_EXT})
   endif()
+
+  find_program(LLVM_LINK llvm-link PATHS ${LLVM_BINARY_DIR}/bin NO_DEFAULT_PATH)
+  find_program(LLVM_CLANGXX clang++ PATHS ${LLVM_BINARY_DIR}/bin NO_DEFAULT_PATH)
+
+  set(KITCUDA_BC_FILE ${CMAKE_CURRENT_BINARY_DIR}/kitcuda.bc)
+  set(KITCUDA_BC_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/cuda/scan_inlined.cu
+  )
+  set(KITCUDA_INDIVIDUAL_BC_FILES "")
+  # Loop through each source file and generate bitcode
+  foreach(CU_SOURCE_FILE ${KITCUDA_BC_SOURCES})
+    get_filename_component(CU_FILENAME ${CU_SOURCE_FILE} NAME_WE) # Get base name without extension
+    set(CU_BC_FILE ${CMAKE_CURRENT_BINARY_DIR}/${CU_FILENAME}-cuda-nvptx64-nvidia-cuda-${KITCUDA_BITCODE_ARCH}.bc)
+    add_custom_command(
+      OUTPUT ${CU_BC_FILE}
+      COMMAND ${LLVM_CLANGXX} -x cuda -O2 ${CU_SOURCE_FILE} -DGEN_BITCODE
+                              --cuda-gpu-arch=${KITCUDA_BITCODE_ARCH} -c -emit-llvm
+      DEPENDS ${CU_SOURCE_FILE}
+      COMMENT "Generating CUDA bitcode for ${CU_FILENAME}.cu"
+      VERBATIM
+    )
+    list(APPEND KITCUDA_INDIVIDUAL_BC_FILES ${CU_BC_FILE})
+  endforeach()
+  set(KITCUDA_BC_FILE ${CMAKE_CURRENT_BINARY_DIR}/kitcuda.bc)
+  add_custom_command(
+    OUTPUT ${KITCUDA_BC_FILE}
+    COMMAND ${LLVM_LINK} -o ${KITCUDA_BC_FILE} ${KITCUDA_INDIVIDUAL_BC_FILES}
+    DEPENDS ${KITCUDA_INDIVIDUAL_BC_FILES} # Depends on all intermediate files
+    COMMENT "Linking CUDA bitcode modules into kitcuda.bc"
+    VERBATIM
+  )
+  add_custom_target(kitcuda_bc_target ALL DEPENDS ${KITCUDA_BC_FILE})
+  add_dependencies(${KITRT} kitcuda_bc_target)
+  install(FILES ${KITCUDA_BC_FILE} DESTINATION ${CLANG_RESOURCE_SUBDIR}/lib)
 endif()
 
 # The KITSUNE_HIP_* variables are defined in ../CMakeLists.txt (i.e. in
