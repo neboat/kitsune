@@ -420,6 +420,75 @@ void *__kitcuda_launch_kernel(const void *fat_bin, const char *kernel_name,
   return (void *)cu_stream;
 }
 
+void __kitcuda_alloc_scanner(const void *fat_bin, const char *kernel_name,
+                             uint64_t trip_count, const KitRTInstMix *inst_mix,
+                             uint64_t size, void **aggregate,
+                             void **inclusive_prefix, void **scan_state) {
+  assert(fat_bin && "kitcuda: alloc scanner with null fat binary!");
+  assert(kernel_name && "kitcuda: alloc scanner with null name!");
+  assert(trip_count != 0 && "kitcuda: alloc scanner with zero trips!");
+
+  KIT_NVTX_PUSH("kitcuda:alloc_scanner", KIT_NVTX_LAUNCH);
+
+  __kitcuda_set_context();
+
+  CUfunction cu_func;
+  KitCudaKernelMap::iterator kernit = _kitcuda_kernel_map.find(kernel_name);
+  if (kernit == _kitcuda_kernel_map.end()) {
+    _kitcuda_module_map_mutex.lock();
+    KitCudaKernelMap::iterator kernit = _kitcuda_kernel_map.find(kernel_name);
+    if (kernit == _kitcuda_kernel_map.end()) {
+      // We have not yet encountered this kernel function...  Check to see
+      // if we already have a supporting module for the fat binary.
+      CUmodule cu_module;
+      KitCudaModuleMap::iterator modit = _kitcuda_module_map.find(fat_bin);
+      if (modit == _kitcuda_module_map.end()) {
+        // Create a supporting CUDA module and "register" the fat binary
+        // image in the map...
+        CU_SAFE_CALL(cuModuleLoadData_p(&cu_module, fat_bin));
+        _kitcuda_module_map[fat_bin] = cu_module;
+      } else
+        cu_module = modit->second;
+
+      // Look up the kernel function.
+      CU_SAFE_CALL(cuModuleGetFunction_p(&cu_func, cu_module, kernel_name));
+      _kitcuda_kernel_map[kernel_name] = cu_func;
+    } else {
+      cu_func = kernit->second;
+    }
+    _kitcuda_module_map_mutex.unlock();
+  } else
+    cu_func = kernit->second;
+
+  int blks_per_grid, threads_per_blk;
+  __kitcuda_get_launch_params(trip_count, cu_func, threads_per_blk,
+                              blks_per_grid, inst_mix);
+  CU_SAFE_CALL(cuMemAlloc_v2_p((CUdeviceptr *)aggregate, size * blks_per_grid))
+  CU_SAFE_CALL(
+      cuMemAlloc_v2_p((CUdeviceptr *)inclusive_prefix, size * blks_per_grid))
+  CU_SAFE_CALL(cuMemAlloc_v2_p((CUdeviceptr *)scan_state,
+                               sizeof(int32_t) * blks_per_grid))
+  CU_SAFE_CALL(cuMemsetD8_v2_p((CUdeviceptr)*scan_state, 0,
+                               sizeof(int32_t) * blks_per_grid))
+  KIT_NVTX_POP();
+}
+
+void __kitcuda_free_scanner(void *aggregate, void *inclusive_prefix,
+                            void *scan_state) {
+  assert(aggregate && "kitcuda: free scanner with null aggregate!");
+  assert(inclusive_prefix &&
+         "kitcuda: free scanner with null inclusive prefix!");
+  assert(scan_state && "kitcuda: free scanner with null scan state!");
+
+  KIT_NVTX_PUSH("kitcuda:free_scanner", KIT_NVTX_LAUNCH);
+  CU_SAFE_CALL(cuMemFree_v2_p((CUdeviceptr)aggregate));
+  CU_SAFE_CALL(cuMemFree_v2_p((CUdeviceptr)inclusive_prefix));
+  CU_SAFE_CALL(cuMemFree_v2_p((CUdeviceptr)scan_state));
+  KIT_NVTX_POP();
+}
+
+void *__kitcuda_null() { return nullptr; }
+
 uint64_t __kitcuda_get_global_symbol(void *fat_bin, const char *sym_name) {
   assert(fat_bin && "null fat binary!");
   assert(sym_name && "null symbol name!");

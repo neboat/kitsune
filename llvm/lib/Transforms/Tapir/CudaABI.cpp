@@ -266,6 +266,16 @@ cl::opt<unsigned>
                                   "the number of blocks per grid in kernel "
                                   "launches. (default: 0 = disabled)"));
 
+cl::opt<bool> UseKitCudaRuntimeBC(
+    "use-kitcuda-runtime-bc", cl::init(true),
+    cl::desc("Use a bitcode file for the Kitsune CUDA runtime ABI"),
+    cl::Hidden);
+
+cl::opt<std::string> ClKitCudaRuntimeBCPath(
+    "kitcuda-runtime-bc-path", cl::init(""),
+    cl::desc("Path to the bitcode file for the Kitsune CUDA runtime ABI"),
+    cl::Hidden);
+
 // Take the NVIDIA CUDA 'sm_' architecture format and convert it into
 // the 'compute_' form.
 std::string virtualArchForCudaArch(StringRef Arch) {
@@ -881,6 +891,7 @@ void CudaLoop::postProcessOutline(TapirLoopInfo &TLI, TaskOutlineInfo &Out,
   ClonedCond->setOperand(TripCountIdx, ThreadEnd);
 
   fixReducersInKernel(KernelF, ThreadIdx, BlockDim, VMap);
+  fixScannersInKernel(KernelF, End, VMap);
   fixDebugInfoInKernel(KernelF);
 
   if (KeepIntermediateFiles) {
@@ -994,6 +1005,32 @@ void CudaLoop::fixDebugInfoInKernel(Function *KernelF) {
   }
 }
 
+namespace {
+const size_t WarpSize = 32;
+const size_t MaxNumWarps = 32;
+
+BasicBlock *GetUniqueExitBlock(Function *KernelF) {
+  SmallSet<BasicBlock *, 8> Terminators;
+  for (BasicBlock &BB : *KernelF) {
+    if (isa<ReturnInst>(BB.getTerminator())) {
+      Terminators.insert(&BB);
+    }
+  }
+  if (Terminators.size() == 1) {
+    return *Terminators.begin();
+  }
+  // This branch is probably here just for correctness. It seems that Kernel
+  // functions outlined by LoopSpawning already have a single exit block. But
+  // in the rare event that it does not, create a new exit block and link all
+  // terminators to it.
+  BasicBlock *NewExit =
+      BasicBlock::Create(KernelF->getContext(), "exit", KernelF);
+  for (BasicBlock *T : Terminators) {
+    ReplaceInstWithInst(T->getTerminator(), BranchInst::Create(NewExit));
+  }
+  return NewExit;
+}
+
 void CreatePrintf(IRBuilder<> &B, const char *Fmt, ArrayRef<Value *> Args) {
   Module &M = *B.GetInsertBlock()->getModule();
   // Create a printf on CUDA
@@ -1028,6 +1065,7 @@ void CreatePrintf(IRBuilder<> &B, const char *Fmt, ArrayRef<Value *> Args) {
   }
   B.CreateCall(Printf, {B.CreateGlobalStringPtr(Fmt), ArgPtr});
 }
+} // namespace
 
 void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
                                    Value *BlockDim, ValueToValueMapTy &VMap) {
@@ -1109,30 +1147,8 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
   }
 
   BasicBlock *Entry = &KernelF->getEntryBlock();
-  BasicBlock *Exit = [&] {
-    SmallSet<BasicBlock *, 8> Terminators;
-    for (BasicBlock &BB : *KernelF) {
-      if (isa<ReturnInst>(BB.getTerminator())) {
-        Terminators.insert(&BB);
-      }
-    }
-    if (Terminators.size() == 1) {
-      return *Terminators.begin();
-    }
-    // This branch is probably here just for correctness. It seems that Kernel
-    // functions outlined by LoopSpawning already have a single exit block. But
-    // in the rare event that it does not, create a new exit block and link all
-    // terminators to it.
-    BasicBlock *NewExit =
-        BasicBlock::Create(KernelF->getContext(), "exit", KernelF);
-    for (BasicBlock *T : Terminators) {
-      ReplaceInstWithInst(T->getTerminator(), BranchInst::Create(NewExit));
-    }
-    return NewExit;
-  }();
+  BasicBlock *Exit = GetUniqueExitBlock(KernelF);
 
-  const size_t WarpSize = 32;
-  const size_t MaxNumWarps = 32;
   // To fix "inlinable function call in a function with debug info must have a
   // !dbg location" error, we need to attach Id and Merge calls with debug
   // locations in this function. So get the first and last debug locations in
@@ -1473,6 +1489,118 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
   B.CreateRetVoid();
 }
 
+void CudaLoop::fixScannersInKernel(Function *KernelF, Value *TripCount,
+                                   ValueToValueMapTy &VMap) {
+
+  // Identify all scanner variables in the kernel.
+  auto *Int32Ty = Type::getInt32Ty(KernelF->getContext());
+
+  const auto VMapReverseLookup = [&VMap](Value *Target) -> Value * {
+    for (auto [K, V] : VMap) {
+      if (V == Target)
+        return const_cast<Value *>(K);
+    }
+    return nullptr;
+  };
+
+  BasicBlock *Entry = &KernelF->getEntryBlock();
+  BasicBlock *Exit = GetUniqueExitBlock(KernelF);
+
+  BasicBlock *IdViewsBB =
+      BasicBlock::Create(KernelF->getContext(), "blk_scan_id_views", KernelF);
+  // Redirect Entry's terminal branch to Exit to IdViewsBB
+  BranchInst *EntryTerm = dyn_cast<BranchInst>(Entry->getTerminator());
+  EntryTerm->setSuccessor(0, IdViewsBB);
+  // At the end of IdViewsBB, branch to Exit
+  {
+    IRBuilder<> B(IdViewsBB);
+    B.CreateBr(Exit);
+  }
+  SmallVector<CallInst *, 8> ScannerCalls;
+
+  for (BasicBlock &BB : *KernelF) {
+    for (Instruction &I : BB) {
+      // Look for __kitcuda_scan function call
+      if (auto *Call = dyn_cast<CallInst>(&I)) {
+        if (Call->getCalledFunction()->getName() != "__kitcuda_scan")
+          continue;
+        // Put the signature here for our reference
+        // __kitcuda_scan(int32_t *view, int32_t *temp_1, int32_t *temp_2,
+        //                int32_t *temp_3, int32_t *shmem, int32_t *aggregate,
+        //                int32_t *inclusive_prefix, int32_t *scan_state,
+        //                size_t size, int32_t *result, size_t n,
+        //                __cilk_identity_fn identity, __cilk_reduce_fn reduce)
+        // size is the ninth argument
+        size_t Size = 0;
+        if (auto *ConstSize = dyn_cast<ConstantInt>(Call->getArgOperand(8))) {
+          Size = ConstSize->getZExtValue();
+        }
+        assert(Size > 0 && Size % sizeof(int32_t) == 0 &&
+               "cuabi: scanner variable has invalid size");
+        ScannerCalls.push_back(Call);
+
+        // Create a shared memory array for the function for block-wide
+        // reduction.
+        ArrayType *ArrayTy =
+            ArrayType::get(Int32Ty, MaxNumWarps * (Size / sizeof(int32_t)));
+        std::string ArrayName = KernelF->getName().str() + ".blk_scan_array." +
+                                Call->getArgOperand(0)->getName().str();
+        GlobalVariable *Array = new GlobalVariable(
+            KernelModule, ArrayTy, false, GlobalValue::InternalLinkage,
+            UndefValue::get(ArrayTy), ArrayName, nullptr,
+            GlobalVariable::NotThreadLocal, 3);
+
+        // Replace shmem argument with the new array
+        // Cast Array to default address space to get around LLVM quirks
+        IRBuilder<> B(Call);
+        PointerType *DestTy = PointerType::get(KernelModule.getContext(), 0);
+        Call->setArgOperand(4, B.CreateAddrSpaceCast(Array, DestTy));
+
+        // Replace dummy trip count with the actual trip count
+        Call->setArgOperand(10, TripCount);
+
+        // Obtain host-side arguments of these buffers. They need to be
+        // preallocated in kernel launch prologue and freed in launch epilogue.
+        Value *Aggregate = VMapReverseLookup(Call->getArgOperand(5));
+        Value *InclusivePrefix = VMapReverseLookup(Call->getArgOperand(6));
+        Value *ScanState = VMapReverseLookup(Call->getArgOperand(7));
+        ScannerInputs.push_back({Size, Aggregate, InclusivePrefix, ScanState});
+      }
+    }
+  }
+  if (ScannerCalls.empty())
+    return;
+  const auto FirstAndLastLoc = getFirstAndLastDebugLoc(KernelF);
+  for (CallInst *Call : ScannerCalls) {
+    // Move the call from the current block (bound-checked) to the exit
+    // block, because __kitcuda_scan is supposed to be called by every
+    // thread in the block.
+    Call->moveBefore(Exit->getTerminator());
+    // Some arguments to the call may not dominate the call after the move, so
+    // move them to the entry block to fix that. Honestly, only arguments 0-3
+    // may need moving, others should be constants or kernel arguments.
+    for (size_t I = 0; I < 4; I++) {
+      Value *Arg = Call->getArgOperand(I);
+      // If Arg is not already in the entry block, move it up there
+      if (Instruction *Inst = dyn_cast<Instruction>(Arg))
+        if (Inst->getParent() != Entry)
+          Inst->moveBefore(EntryTerm);
+      // In the general case, we also need to move the instruction's dependency
+      // up as well. But in the current implementation these instructions are
+      // really just GEP of alloca in the entry block, so no dependencies need
+      // moving.
+    }
+    {
+      IRBuilder<> B(IdViewsBB->getTerminator());
+      // Create a call to the identity function in the alt path
+      CallInst *IdCall =
+          B.CreateCall(dyn_cast<Function>(Call->getArgOperand(11)),
+                       {Call->getArgOperand(0)});
+      IdCall->setDebugLoc(FirstAndLastLoc.first);
+    }
+  }
+}
+
 Function *CudaLoop::resolveLibDeviceFunction(Function *Fn, bool enableFast) {
   std::unique_ptr<Module> &LDM = TTarget->getLibDeviceModule();
   const std::string NVPrefix = "__nv_";
@@ -1776,13 +1904,54 @@ void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
     }
   }
 
+  ValueToValueMapTy DeviceScannerAuxArrays;
+  SmallVector<CallInst *, 1> ScannerAllocCalls;
+  if (!ScannerInputs.empty()) {
+    Type *VoidTy = Type::getVoidTy(Ctx);
+    FunctionCallee KitCudaAllocScanner = M.getOrInsertFunction(
+        "__kitcuda_alloc_scanner", VoidTy, VoidPtrTy, VoidPtrTy, Int64Ty,
+        VoidPtrTy, Int64Ty, VoidPtrTy, VoidPtrTy, VoidPtrTy);
+    Value *NullPtrPlaceholder = ConstantPointerNull::get(VoidPtrTy);
+    for (ScannerOutlineLoopCallInfo &SOI : ScannerInputs) {
+      Value *AggregatePtr = EntryBuilder.CreateAlloca(VoidPtrTy);
+      Value *InclusivePrefixPtr = EntryBuilder.CreateAlloca(VoidPtrTy);
+      Value *ScanStatePtr = EntryBuilder.CreateAlloca(VoidPtrTy);
+      CallInst *ScannerAllocCall = NewBuilder.CreateCall(
+          KitCudaAllocScanner,
+          {
+              // These four values are placeholders and will be replaced later
+              NullPtrPlaceholder,           // Fatbinary
+              NullPtrPlaceholder,           // Kernel name
+              ConstantInt::get(Int64Ty, 0), // Trip count
+              NullPtrPlaceholder,           // InstMix
+
+              ConstantInt::get(Int64Ty, SOI.Size),
+              AggregatePtr,
+              InclusivePrefixPtr,
+              ScanStatePtr,
+          });
+      ScannerAllocCalls.push_back(ScannerAllocCall);
+      DeviceScannerAuxArrays[SOI.Aggregate] =
+          NewBuilder.CreateLoad(VoidPtrTy, AggregatePtr);
+      DeviceScannerAuxArrays[SOI.InclusivePrefix] =
+          NewBuilder.CreateLoad(VoidPtrTy, InclusivePrefixPtr);
+      DeviceScannerAuxArrays[SOI.ScanState] =
+          NewBuilder.CreateLoad(VoidPtrTy, ScanStatePtr);
+    }
+  }
+
   for (Value *V : OrderedInputs) {
     Value *RealV = V;
-    bool IsReducer = false;
+    bool IsReducerOrScanner = false;
     if (auto ReducerInput = DeviceReducerViews.find(V);
         ReducerInput != DeviceReducerViews.end()) {
-      IsReducer = true;
+      IsReducerOrScanner = true;
       RealV = ReducerInput->second;
+    }
+    if (auto ScannerInput = DeviceScannerAuxArrays.find(V);
+        ScannerInput != DeviceScannerAuxArrays.end()) {
+      IsReducerOrScanner = true;
+      RealV = ScannerInput->second;
     }
 
     Value *VP = EntryBuilder.CreateAlloca(V->getType());
@@ -1793,7 +1962,8 @@ void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
     NewBuilder.CreateStore(VoidVPtr, ArgPtr);
     i++;
 
-    if (!IsReducer && CodeGenPrefetch && RealV->getType()->isPointerTy()) {
+    if (!IsReducerOrScanner && CodeGenPrefetch &&
+        RealV->getType()->isPointerTy()) {
       LLVM_DEBUG(dbgs() << "\t\t- code gen prefetch for kernel arg #" << i
                         << "\n");
       Value *VoidPP = NewBuilder.CreateBitCast(RealV, VoidPtrTy);
@@ -1901,13 +2071,32 @@ void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
   LLVM_DEBUG(dbgs() << "\t\t+- deferred sync: " << Hints.getDeferredSync()
                     << "\n");
 
-  if (!Hints.getDeferredSync() || !ReducerInputs.empty()) {
+  if (!Hints.getDeferredSync() || !ReducerInputs.empty() ||
+      !ScannerInputs.empty()) {
     // Only generate sync call when the loop is not marked default sync or if
     // it's a reduction
     Type *VoidTy = Type::getVoidTy(Ctx);
     FunctionCallee KitCudaSyncFn = M.getOrInsertFunction(
         "__kitcuda_sync_thread_stream", VoidTy, VoidPtrTy);
     NewBuilder.CreateCall(KitCudaSyncFn, {LaunchStream});
+    if (!ScannerInputs.empty()) {
+      FunctionCallee KitCudaFreeScannerFn = M.getOrInsertFunction(
+          "__kitcuda_free_scanner", VoidTy, VoidPtrTy, VoidPtrTy, VoidPtrTy);
+      for (ScannerOutlineLoopCallInfo &SOI : ScannerInputs) {
+        NewBuilder.CreateCall(KitCudaFreeScannerFn,
+                              {DeviceScannerAuxArrays[SOI.Aggregate],
+                               DeviceScannerAuxArrays[SOI.InclusivePrefix],
+                               DeviceScannerAuxArrays[SOI.ScanState]});
+      }
+      for (CallInst *ScannerAllocCall : ScannerAllocCalls) {
+        ScannerAllocCall->setArgOperand(0, DummyFBPtr);
+        ScannerAllocCall->setArgOperand(1, KNameParam);
+        ScannerAllocCall->setArgOperand(2, CastTripCount);
+        ScannerAllocCall->setArgOperand(3, AI);
+      }
+    }
+    // Move AI to befoer teh first ScannerAllocCall
+    AI->moveBefore(ScannerAllocCalls.front());
   }
   TOI.ReplCall->eraseFromParent();
 
@@ -2369,6 +2558,13 @@ void CudaABI::finalizeLaunchCalls(Module &M, GlobalVariable *Fatbin) {
                     {VGVPtr, DevPtr, ConstantInt::get(Int64Ty, NumBytes)}, "",
                     NI);
               }
+            } else if (CFn->getName().starts_with("__kitcuda_alloc_scanner")) {
+              LLVM_DEBUG(dbgs() << "\t\t\t* patching __kitcuda_alloc_scanner: "
+                                << *CI << "\n");
+              SavedLaunchCI = CI;
+              Value *CFatbin = CastInst::CreateBitOrPointerCast(
+                  Fatbin, VoidPtrTy, "_cubin.fatbin", CI);
+              CI->setArgOperand(0, CFatbin);
             }
           }
         }
@@ -2802,6 +2998,26 @@ void fixFencesAndAtomics(Module &KernelModule) {
 } // namespace
 
 CudaABIOutputFile CudaABI::generatePTX() {
+  // Link in the Bitcode file
+  if (UseKitCudaRuntimeBC) {
+    SMDiagnostic SMD;
+    LLVMContext &C = KernelModule.getContext();
+    // Parse the bitcode file.  This call imports structure definitions, but not
+    // function definitions.
+    if (std::unique_ptr<Module> ExternalModule =
+            parseIRFile(ClKitCudaRuntimeBCPath, SMD, C)) {
+      // Link the external module into the current module, copying over global
+      // values.
+      bool Fail = Linker::linkModules(KernelModule, std::move(ExternalModule),
+                                      Linker::Flags::LinkOnlyNeeded);
+      if (Fail)
+        C.emitError("CudaABI: Failed to link bitcode ABI file: " +
+                    Twine(ClKitCudaRuntimeBCPath));
+    } else {
+      C.emitError("CudaABI: Failed to parse bitcode ABI file: " +
+                  Twine(ClKitCudaRuntimeBCPath));
+    }
+  }
 
   LLVM_DEBUG(dbgs() << "\t- generating PTX...\n");
   LLVM_DEBUG(saveModuleToFile(&KernelModule, KernelModule.getName().str() +
@@ -2823,8 +3039,7 @@ CudaABIOutputFile CudaABI::generatePTX() {
                                              sys::fs::OpenFlags::OF_None);
   PTXFile->keep();
 
-  KernelModule.addModuleFlag(llvm::Module::Override, "nvvm-reflect-ftz", true);
-
+  KernelModule.setModuleFlag(llvm::Module::Override, "nvvm-reflect-ftz", true);
   if (OptLevel > 0) {
     if (OptLevel > 3)
       OptLevel = 3;

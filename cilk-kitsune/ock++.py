@@ -333,6 +333,8 @@ class Invocation:
                 "--tapir-target=opencilk",
                 "--use-opencilk-runtime-bc",
                 f"--opencilk-runtime-bc-path={self.kitsune_path}/lib/clang/19/lib/x86_64-unknown-linux-gnu/libopencilk-abi.bc",
+                "--use-kitcuda-runtime-bc",
+                f"--kitcuda-runtime-bc-path={self.kitsune_path}/lib/clang/19/lib/kitcuda.bc",
                 "--cuabi-embed-ptx",
                 # *debug_flags,
                 "-S",

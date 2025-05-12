@@ -267,6 +267,14 @@ private:
   // ReducerOutlineLoopCallInfo.
   DenseMap<const Value *, ReducerOutlineLoopCallInfo> ReducerInputs;
 
+  struct ScannerOutlineLoopCallInfo {
+    size_t Size;
+    Value *Aggregate;
+    Value *InclusivePrefix;
+    Value *ScanState;
+  };
+  SmallVector<ScannerOutlineLoopCallInfo, 1> ScannerInputs;
+
 public:
   CudaLoop(Module &M,   // Input module (host side)
            Module &KM,  // Target module for CUDA code
@@ -300,6 +308,9 @@ public:
                           ValueToValueMapTy &VMap) override final;
 
   void fixReducersInKernel(Function *KernelF, Value *ThreadIdx, Value *BlockDim,
+                           ValueToValueMapTy &VMap);
+
+  void fixScannersInKernel(Function *KernelF, Value *TripCount,
                            ValueToValueMapTy &VMap);
 
   void fixDebugInfoInKernel(Function *KernelF);
