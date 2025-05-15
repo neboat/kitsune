@@ -1009,7 +1009,7 @@ namespace {
 const size_t WarpSize = 32;
 const size_t MaxNumWarps = 32;
 
-BasicBlock *GetUniqueExitBlock(Function *KernelF) {
+BasicBlock *getUniqueExitBlock(Function *KernelF) {
   SmallSet<BasicBlock *, 8> Terminators;
   for (BasicBlock &BB : *KernelF) {
     if (isa<ReturnInst>(BB.getTerminator())) {
@@ -1031,7 +1031,7 @@ BasicBlock *GetUniqueExitBlock(Function *KernelF) {
   return NewExit;
 }
 
-void CreatePrintf(IRBuilder<> &B, const char *Fmt, ArrayRef<Value *> Args) {
+void createPrintf(IRBuilder<> &B, const char *Fmt, ArrayRef<Value *> Args) {
   Module &M = *B.GetInsertBlock()->getModule();
   // Create a printf on CUDA
   Function *Printf;
@@ -1065,6 +1065,45 @@ void CreatePrintf(IRBuilder<> &B, const char *Fmt, ArrayRef<Value *> Args) {
   }
   B.CreateCall(Printf, {B.CreateGlobalStringPtr(Fmt), ArgPtr});
 }
+
+void moveInstBeforeWithDbgInfo(Instruction *Inst, Instruction *Before) {
+  // Move the debug info.
+  if (Instruction *DbgInst = Inst->getPrevNonDebugInstruction()) {
+    DbgInst = DbgInst->getNextNode();
+    SmallVector<Instruction *, 8> DbgInsts;
+    for (; DbgInst != Inst; DbgInst = DbgInst->getNextNode())
+      DbgInsts.push_back(DbgInst);
+    for (Instruction *DbgInst : DbgInsts)
+      DbgInst->moveBefore(Before);
+  }
+  // Move the instruction itself.
+  Inst->moveBefore(Before);
+}
+
+void hoistToEntry(Value *V, BasicBlock *Entry) {
+  Instruction *Inst = dyn_cast<Instruction>(V);
+  if (!Inst || Inst->getParent() == Entry)
+    return;
+  Instruction *EntryTerm = Entry->getTerminator();
+  for (size_t I = 0; I < Inst->getNumOperands(); I++)
+    hoistToEntry(Inst->getOperand(I), Entry);
+  if (LoadInst *LI = dyn_cast<LoadInst>(Inst)) {
+    // Also hoist all stores to SrcPtr to the entry block. This is a hack
+    // that's not generally correct, but whatever.
+    Value *SrcPtr = LI->getPointerOperand();
+    Function *F = LI->getFunction();
+    SmallVector<StoreInst *, 1> Stores;
+    for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I) {
+      if (StoreInst *SI = dyn_cast<StoreInst>(&*I))
+        if (SI->getPointerOperand() == SrcPtr)
+          Stores.push_back(SI);
+    }
+    for (StoreInst *SI : Stores)
+      hoistToEntry(SI, Entry);
+  }
+  moveInstBeforeWithDbgInfo(Inst, EntryTerm);
+}
+
 } // namespace
 
 void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
@@ -1147,7 +1186,7 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
   }
 
   BasicBlock *Entry = &KernelF->getEntryBlock();
-  BasicBlock *Exit = GetUniqueExitBlock(KernelF);
+  BasicBlock *Exit = getUniqueExitBlock(KernelF);
 
   // To fix "inlinable function call in a function with debug info must have a
   // !dbg location" error, we need to attach Id and Merge calls with debug
@@ -1491,9 +1530,35 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
 
 void CudaLoop::fixScannersInKernel(Function *KernelF, Value *TripCount,
                                    ValueToValueMapTy &VMap) {
-
-  // Identify all scanner variables in the kernel.
   auto *Int32Ty = Type::getInt32Ty(KernelF->getContext());
+  struct ScannerInfo {
+    size_t Size;
+    Type *Type;
+    CallInst *Call;
+  };
+  SmallVector<ScannerInfo, 8> Scanners;
+  for (inst_iterator I = inst_begin(KernelF), E = inst_end(KernelF); I != E;
+       ++I) {
+    if (auto *Call = dyn_cast<CallInst>(&*I)) {
+      if (Call->getCalledFunction()->getName() != "__kitcuda_get_scan_view")
+        continue;
+      size_t Size = 0;
+      if (auto *ConstSize = dyn_cast<ConstantInt>(Call->getArgOperand(0))) {
+        Size = ConstSize->getZExtValue();
+      }
+      assert(Size > 0 && Size % sizeof(int32_t) == 0 &&
+             "cuabi: scanner variable has invalid size");
+      size_t NumI32s = Size / sizeof(int32_t);
+      Type *Ty =
+          NumI32s == 1
+              ? static_cast<Type *>(Int32Ty) // Does it improve performance?
+              : ArrayType::get(Int32Ty, NumI32s);
+      Scanners.push_back({Size, Ty, Call});
+    }
+  }
+
+  if (Scanners.empty())
+    return;
 
   const auto VMapReverseLookup = [&VMap](Value *Target) -> Value * {
     for (auto [K, V] : VMap) {
@@ -1504,100 +1569,62 @@ void CudaLoop::fixScannersInKernel(Function *KernelF, Value *TripCount,
   };
 
   BasicBlock *Entry = &KernelF->getEntryBlock();
-  BasicBlock *Exit = GetUniqueExitBlock(KernelF);
-
-  BasicBlock *IdViewsBB =
-      BasicBlock::Create(KernelF->getContext(), "blk_scan_id_views", KernelF);
-  // Redirect Entry's terminal branch to Exit to IdViewsBB
-  BranchInst *EntryTerm = dyn_cast<BranchInst>(Entry->getTerminator());
-  EntryTerm->setSuccessor(0, IdViewsBB);
-  // At the end of IdViewsBB, branch to Exit
-  {
-    IRBuilder<> B(IdViewsBB);
-    B.CreateBr(Exit);
-  }
-  SmallVector<CallInst *, 8> ScannerCalls;
-
-  for (BasicBlock &BB : *KernelF) {
-    for (Instruction &I : BB) {
-      // Look for __kitcuda_scan function call
-      if (auto *Call = dyn_cast<CallInst>(&I)) {
-        if (Call->getCalledFunction()->getName() != "__kitcuda_scan")
-          continue;
-        // Put the signature here for our reference
-        // __kitcuda_scan(int32_t *view, int32_t *temp_1, int32_t *temp_2,
-        //                int32_t *temp_3, int32_t *shmem, int32_t *aggregate,
-        //                int32_t *inclusive_prefix, int32_t *scan_state,
-        //                size_t size, int32_t *result, size_t n,
-        //                __cilk_identity_fn identity, __cilk_reduce_fn reduce)
-        // size is the ninth argument
-        size_t Size = 0;
-        if (auto *ConstSize = dyn_cast<ConstantInt>(Call->getArgOperand(8))) {
-          Size = ConstSize->getZExtValue();
-        }
-        assert(Size > 0 && Size % sizeof(int32_t) == 0 &&
-               "cuabi: scanner variable has invalid size");
-        ScannerCalls.push_back(Call);
-
-        // Create a shared memory array for the function for block-wide
-        // reduction.
-        ArrayType *ArrayTy =
-            ArrayType::get(Int32Ty, MaxNumWarps * (Size / sizeof(int32_t)));
-        std::string ArrayName = KernelF->getName().str() + ".blk_scan_array." +
-                                Call->getArgOperand(0)->getName().str();
-        GlobalVariable *Array = new GlobalVariable(
-            KernelModule, ArrayTy, false, GlobalValue::InternalLinkage,
-            UndefValue::get(ArrayTy), ArrayName, nullptr,
-            GlobalVariable::NotThreadLocal, 3);
-
-        // Replace shmem argument with the new array
-        // Cast Array to default address space to get around LLVM quirks
-        IRBuilder<> B(Call);
-        PointerType *DestTy = PointerType::get(KernelModule.getContext(), 0);
-        Call->setArgOperand(4, B.CreateAddrSpaceCast(Array, DestTy));
-
-        // Replace dummy trip count with the actual trip count
-        Call->setArgOperand(10, TripCount);
-
-        // Obtain host-side arguments of these buffers. They need to be
-        // preallocated in kernel launch prologue and freed in launch epilogue.
-        Value *Aggregate = VMapReverseLookup(Call->getArgOperand(5));
-        Value *InclusivePrefix = VMapReverseLookup(Call->getArgOperand(6));
-        Value *ScanState = VMapReverseLookup(Call->getArgOperand(7));
-        ScannerInputs.push_back({Size, Aggregate, InclusivePrefix, ScanState});
-      }
-    }
-  }
-  if (ScannerCalls.empty())
-    return;
+  BasicBlock *Exit = getUniqueExitBlock(KernelF);
   const auto FirstAndLastLoc = getFirstAndLastDebugLoc(KernelF);
-  for (CallInst *Call : ScannerCalls) {
-    // Move the call from the current block (bound-checked) to the exit
-    // block, because __kitcuda_scan is supposed to be called by every
-    // thread in the block.
-    Call->moveBefore(Exit->getTerminator());
-    // Some arguments to the call may not dominate the call after the move, so
-    // move them to the entry block to fix that. Honestly, only arguments 0-3
-    // may need moving, others should be constants or kernel arguments.
-    for (size_t I = 0; I < 4; I++) {
-      Value *Arg = Call->getArgOperand(I);
-      // If Arg is not already in the entry block, move it up there
-      if (Instruction *Inst = dyn_cast<Instruction>(Arg))
-        if (Inst->getParent() != Entry)
-          Inst->moveBefore(EntryTerm);
-      // In the general case, we also need to move the instruction's dependency
-      // up as well. But in the current implementation these instructions are
-      // really just GEP of alloca in the entry block, so no dependencies need
-      // moving.
-    }
-    {
-      IRBuilder<> B(IdViewsBB->getTerminator());
-      // Create a call to the identity function in the alt path
-      CallInst *IdCall =
-          B.CreateCall(dyn_cast<Function>(Call->getArgOperand(11)),
-                       {Call->getArgOperand(0)});
-      IdCall->setDebugLoc(FirstAndLastLoc.first);
-    }
+  IRBuilder<> EntryBuilder(Entry->getTerminator());
+  IRBuilder<> ExitBuilder(Exit->getTerminator());
+
+  auto *PtrTy = PointerType::get(KernelModule.getContext(), 0);
+  auto *Int64Ty = Type::getInt64Ty(KernelModule.getContext());
+  auto *VoidTy = Type::getVoidTy(KernelModule.getContext());
+  FunctionCallee KitCudaScanFn = KernelModule.getOrInsertFunction(
+      "__kitcuda_scan", /* returns */ VoidTy,
+      /* view */ PtrTy, /* temp_1 */ PtrTy, /* temp_2 */ PtrTy,
+      /* temp_3 */ PtrTy, /* shmem */ PtrTy,
+      /* aggregate */ PtrTy, /* inclusive_prefix */ PtrTy,
+      /* scan_state */ PtrTy, /* size */ Int64Ty,
+      /* result */ PtrTy, /* n */ Int64Ty, /* identity */ PtrTy,
+      /* reduce */ PtrTy);
+
+  for (ScannerInfo &SI : Scanners) {
+    // Create Allocas
+    Value *View = EntryBuilder.CreateAlloca(SI.Type);
+    Value *Temp1 = EntryBuilder.CreateAlloca(SI.Type);
+    Value *Temp2 = EntryBuilder.CreateAlloca(SI.Type);
+    Value *Temp3 = EntryBuilder.CreateAlloca(SI.Type);
+
+    Value *Aggregate = SI.Call->getArgOperand(1);
+    Value *InclusivePrefix = SI.Call->getArgOperand(2);
+    Value *ScanState = SI.Call->getArgOperand(3);
+    Value *Result = SI.Call->getArgOperand(4);
+    Value *IdFn = SI.Call->getArgOperand(5);
+    Value *ReduceFn = SI.Call->getArgOperand(6);
+
+    ArrayType *ArrayTy =
+        ArrayType::get(Int32Ty, MaxNumWarps * (SI.Size / sizeof(int32_t)));
+    std::string ArrayName = KernelF->getName().str() + ".blk_scan_array." +
+                            SI.Call->getArgOperand(0)->getName().str();
+    GlobalVariable *Array = new GlobalVariable(
+        KernelModule, ArrayTy, false, GlobalValue::InternalLinkage,
+        UndefValue::get(ArrayTy), ArrayName, nullptr,
+        GlobalVariable::NotThreadLocal, 3);
+    Value *Shmem = ExitBuilder.CreateAddrSpaceCast(Array, PtrTy);
+    CallInst *ScanCall = ExitBuilder.CreateCall(
+        KitCudaScanFn,
+        {View, Temp1, Temp2, Temp3, Shmem, Aggregate, InclusivePrefix,
+         ScanState, ConstantInt::get(Int64Ty, SI.Size), Result, TripCount, IdFn,
+         ReduceFn});
+    ScanCall->setDebugLoc(FirstAndLastLoc.second);
+    CallInst *IdCall =
+        EntryBuilder.CreateCall(dyn_cast<Function>(IdFn), {View});
+    IdCall->setDebugLoc(FirstAndLastLoc.first);
+
+    SI.Call->replaceAllUsesWith(View);
+    SI.Call->eraseFromParent();
+
+    ScannerInputs.push_back({SI.Size, VMapReverseLookup(Aggregate),
+                             VMapReverseLookup(InclusivePrefix),
+                             VMapReverseLookup(ScanState)});
   }
 }
 
@@ -1754,6 +1781,14 @@ void CudaLoop::remapData(ValueToValueMapTy &VMap) {
     }
   }
   ReducerInputs = std::move(NewReducerInputs);
+  for (ScannerOutlineLoopCallInfo &SOI : ScannerInputs) {
+    if (auto MappedV = VMap[SOI.Aggregate])
+      SOI.Aggregate = MappedV;
+    if (auto MappedV = VMap[SOI.InclusivePrefix])
+      SOI.InclusivePrefix = MappedV;
+    if (auto MappedV = VMap[SOI.ScanState])
+      SOI.ScanState = MappedV;
+  }
   // Remap SyncRegList
   CudaABI::SyncRegionListTy NewSyncRegList;
   for (auto &SyncReg : TTarget->SyncRegList) {
@@ -2094,9 +2129,9 @@ void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
         ScannerAllocCall->setArgOperand(2, CastTripCount);
         ScannerAllocCall->setArgOperand(3, AI);
       }
+      // Move AI to befoer teh first ScannerAllocCall
+      AI->moveBefore(ScannerAllocCalls.front());
     }
-    // Move AI to befoer teh first ScannerAllocCall
-    AI->moveBefore(ScannerAllocCalls.front());
   }
   TOI.ReplCall->eraseFromParent();
 

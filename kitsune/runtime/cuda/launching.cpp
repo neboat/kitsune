@@ -463,13 +463,15 @@ void __kitcuda_alloc_scanner(const void *fat_bin, const char *kernel_name,
   int blks_per_grid, threads_per_blk;
   __kitcuda_get_launch_params(trip_count, cu_func, threads_per_blk,
                               blks_per_grid, inst_mix);
-  CU_SAFE_CALL(cuMemAlloc_v2_p((CUdeviceptr *)aggregate, size * blks_per_grid))
-  CU_SAFE_CALL(
-      cuMemAlloc_v2_p((CUdeviceptr *)inclusive_prefix, size * blks_per_grid))
-  CU_SAFE_CALL(cuMemAlloc_v2_p((CUdeviceptr *)scan_state,
-                               sizeof(int32_t) * blks_per_grid))
-  CU_SAFE_CALL(cuMemsetD8_v2_p((CUdeviceptr)*scan_state, 0,
-                               sizeof(int32_t) * blks_per_grid))
+  CUstream cu_stream = (CUstream)__kitcuda_get_thread_stream();
+  CU_SAFE_CALL(cuMemAllocAsync_p((CUdeviceptr *)aggregate, size * blks_per_grid,
+                                 cu_stream))
+  CU_SAFE_CALL(cuMemAllocAsync_p((CUdeviceptr *)inclusive_prefix,
+                                 size * blks_per_grid, cu_stream))
+  CU_SAFE_CALL(cuMemAllocAsync_p((CUdeviceptr *)scan_state,
+                                 sizeof(int32_t) * blks_per_grid, cu_stream))
+  CU_SAFE_CALL(cuMemsetD8Async_p((CUdeviceptr)*scan_state, 0,
+                                 sizeof(int32_t) * blks_per_grid, cu_stream))
   KIT_NVTX_POP();
 }
 
@@ -481,9 +483,10 @@ void __kitcuda_free_scanner(void *aggregate, void *inclusive_prefix,
   assert(scan_state && "kitcuda: free scanner with null scan state!");
 
   KIT_NVTX_PUSH("kitcuda:free_scanner", KIT_NVTX_LAUNCH);
-  CU_SAFE_CALL(cuMemFree_v2_p((CUdeviceptr)aggregate));
-  CU_SAFE_CALL(cuMemFree_v2_p((CUdeviceptr)inclusive_prefix));
-  CU_SAFE_CALL(cuMemFree_v2_p((CUdeviceptr)scan_state));
+  CUstream cu_stream = (CUstream)__kitcuda_get_thread_stream();
+  CU_SAFE_CALL(cuMemFreeAsync_p((CUdeviceptr)aggregate, cu_stream));
+  CU_SAFE_CALL(cuMemFreeAsync_p((CUdeviceptr)inclusive_prefix, cu_stream));
+  CU_SAFE_CALL(cuMemFreeAsync_p((CUdeviceptr)scan_state, cu_stream));
   KIT_NVTX_POP();
 }
 
