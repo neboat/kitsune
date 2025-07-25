@@ -325,7 +325,8 @@ std::string PTXVersionFromCudaVersion() {
           .Case("12.4", "+ptx83")
           .Case("12.5", "+ptx83")
           .Case("12.6", "+ptx83")
-          .Case("12.8", "+ptx83")
+          .Case("12.8", "+ptx87")
+          .Case("12.9", "+ptx87")
           .Default("");
 
   if (PTXVersionStr == "") {
@@ -1364,81 +1365,145 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
 }
 
 Function *CudaLoop::resolveLibDeviceFunction(Function *Fn, bool enableFast) {
-  std::unique_ptr<Module> &LDM = TTarget->getLibDeviceModule();
-  const std::string NVPrefix = "__nv_";
+  // If the function is a target intrinsic, just return the intrinsic again
+  // since it is "built-in"
+  if (Fn->isTargetIntrinsic()) {
+    LLVM_DEBUG(dbgs() << "cuabi: function '" << Fn->getName()
+                      << "()' resolved as a target-specific intrinsic.\n");
+    return Fn;
+  }
 
-  // Handle special cases where code generation can be a bit more
-  // complex; e.g., printf().
-  if (Fn->getName() == "printf" || Fn->getName() == "fprintf") {
+  std::string NVPrefix = "__nv_";
+  if (NVPrefix == Fn->getName().str().substr(0, NVPrefix.size() - 1)) {
+    LLVM_DEBUG(dbgs() << "cuabi: skipping already prefixed function '"
+                      << Fn->getName() << "()'.\n");
+    return Fn;
+  }
+
+  // TODO #2: Add printf() support (correct codegen)...
+  if (Fn->getName() == "printf" || Fn->getName() == "fprintf")
     report_fatal_error("cuabi: printf is currently unsupported "
-                       "in parallel loops... :-(\n");
-  }
+                       "in device-side code... :-(\n");
 
-  std::string FnName = "";
-  if (Fn->isIntrinsic()) {
+  std::string FnName;
 
-    if (enableFast)
-      FnName = "fast_";
+  LLVM_DEBUG(dbgs() << "\t\tresolving device library function '"
+                    << Fn->getName() << "' for cuda device module.\n");
 
-    if (Fn->getName().str().compare(0, 9, "llvm.nvvm") == 0)
-      return nullptr; // backend can handle these...
-    else if (Fn->getName() == "llvm.cos.f32")
-      FnName += "cosf";
-    else if (Fn->getName() == "llvm.cos.f64")
-      FnName += "cos";
-    else if (Fn->getName() == "llvm.sin.f32")
-      FnName += "sinf";
-    else if (Fn->getName() == "llvm.sin.f64")
-      FnName += "sin";
-    else if (Fn->getName() == "llvm.tan.f32")
-      FnName += "tanf";
-    else if (Fn->getName() == "llvm.tan.f64")
-      FnName += "tan";
-    else if (Fn->getName() == "llvm.exp.f64")
-      FnName += "exp";
-    else if (Fn->getName() == "llvm.expf.f32")
-      FnName += "expf";
-    else {
-      // errs() << "cuabi: transforming intrinsic call " << Fn->getName() <<
-      // "()\n"; report_fatal_error("cuabi: no transform for llvm intrinsic!");
+  if (enableFast)
+    NVPrefix += "fast_";
+
+  FnName = NVPrefix + StringSwitch<std::string>(Fn->getName().str())
+                          .Case("acos", "acos")
+                          .Case("acosf", "acosf")
+                          .Case("acosh", "acosh")
+                          .Case("acoshf", "acoshf")
+                          .Case("asin", "asin")
+                          .Case("asinf", "asinf")
+                          .Case("asinh", "asinh")
+                          .Case("asinhf", "asinhf")
+                          .Case("atan2", "atan2")
+                          .Case("atan2f", "atan2f")
+                          .Case("atan", "atan")
+                          .Case("atanf", "atahnf")
+                          .Case("atanh", "atanh")
+                          .Case("atanhf", "atanhf")
+                          .Case("cbrt", "cbrt")
+                          .Case("cbrtf", "cbrtf")
+                          .Case("cos", "cos")
+                          .Case("cosf", "cosf")
+                          .Case("cosh", "cosh")
+                          .Case("coshf", "coshf")
+                          .Case("erfc", "erfc")
+                          .Case("erfcf", "erfcf")
+                          .Case("erf", "erf")
+                          .Case("erff", "erff")
+                          .Case("exp2", "exp2")
+                          .Case("exp2f", "exp2f")
+                          .Case("exp", "exp")
+                          .Case("expf", "expf")
+                          .Case("expm1", "expm1")
+                          .Case("expm1f", "expm1f")
+                          .Case("fmodf", "fmodf")
+                          .Case("fmod", "fmod")
+                          .Case("hypotf", "hypotf")
+                          .Case("hypot", "hypot")
+                          .Case("lgammaf", "lgammaf")
+                          .Case("lgamma", "lgamma")
+                          .Case("llvm.cos.f32", "cosf")
+                          .Case("llvm.cos.f64", "cos")
+                          .Case("llvm.exp.f32", "expf")
+                          .Case("llvm.exp.f64", "exp")
+                          .Case("llvm.fabs.f32", "fabsf")
+                          .Case("llvm.fabs.f64", "fabs")
+                          .Case("llvm.fmod.f32", "fmodf")
+                          .Case("llvm.fmod.f64", "fmod")
+                          .Case("llvm.maxnum.f32", "fmaxf") // correct?
+                          .Case("llvm.maxnum.f64", "fmax")  // correct?
+                          .Case("llvm.minnum.f32", "fminf") // correct?
+                          .Case("llvm.minnum.f64", "fmin")  // correct?
+                          .Case("llvm.pow.f32", "powf")
+                          .Case("llvm.pow.f64", "pow")
+                          .Case("llvm.sincos.f32", "sincosf")
+                          .Case("llvm.sincos.f64", "sincos")
+                          .Case("llvm.sin.f32", "sinf")
+                          .Case("llvm.sin.f64", "sin")
+                          .Case("llvm.sqrt.f32", "sqrtf")
+                          .Case("llvm.sqrt.f64", "sqrt")
+                          .Case("llvm.tan.f32", "tanf")
+                          .Case("llvm.tan.f64", "tan")
+                          .Case("llvm.tanh.f32", "tanhf ")
+                          .Case("llvm.tanh.f64", "tanh")
+                          .Case("log10f", "log10f")
+                          .Case("log10", "log10")
+                          .Case("log1pf", "log1pf")
+                          .Case("log1p", "log1p")
+                          .Case("log2f", "log2f")
+                          .Case("log2", "log2")
+                          .Case("logf", "logf")
+                          .Case("log", "log")
+                          .Case("powf", "powf")
+                          .Case("pow", "pow")
+                          .Case("sincosf", "sincosf")
+                          .Case("sincos", "sincos")
+                          .Case("sinf", "sinf")
+                          .Case("sinhf", "sinhf")
+                          .Case("sinh", "sinh")
+                          .Case("sin", "sin")
+                          .Case("sqrtf", "sqrtf")
+                          .Case("sqrt", "sqrt")
+                          .Case("tanf", "tanf")
+                          .Case("tanhf", "tanhf")
+                          .Case("tanh", "tanh")
+                          .Case("tan", "tan")
+                          .Case("tgammaf", "tgammaf")
+                          .Case("tgamma", "tgamma")
+                          .Default("");
+
+  if (FnName == NVPrefix) {
+    if (Fn->isIntrinsic())
+      return Fn;
+    else
       return nullptr;
-    }
+  }
+
+  std::unique_ptr<Module> &DevMod = TTarget->getLibDeviceModule();
+  if (Function *DevFn = DevMod->getFunction(FnName)) {
+    LLVM_DEBUG(dbgs() << "\t\t\tresolved mapped function '" << FnName
+                      << "' in device library module.\n");
+    if (Function *KF = KernelModule.getFunction(FnName))
+      return KF;
+
+    Function *DeviceF =
+        Function::Create(DevFn->getFunctionType(), DevFn->getLinkage(),
+                         DevFn->getName(), KernelModule);
+    DeviceF->setAttributes(DevFn->getAttributes());
+    return DeviceF;
   } else {
-    if (Fn->getName() == "__sqrtf_finite") {
-      FnName = "llvm.nvvm.sqrt.approx.ftz.f";
-      // errs() << "\t mapping to " << FnName << "\n";
-    } else if (Fn->getName() == "__powf_finite")
-      FnName = "fast_powf";
-    else if (Fn->getName() == "__fmodf_finite")
-      FnName = "modff";
-    else if (Fn->getName() == "expf") {
-      if (enableFast)
-        FnName = "__nv_fast_expf";
-      else
-        FnName = "__nv_expf";
-      errs() << "call for exp: " << FnName << "().\n";
-    }
+    LLVM_DEBUG(dbgs() << "\t\t\t *unresolved* function '" << FnName
+                      << "()'.  Not in libdevice....\n");
+    return nullptr;
   }
-
-  FnName = Fn->getName().str();
-  if (Function *KF = KernelModule.getFunction(NVPrefix + FnName)) {
-    LLVM_DEBUG(dbgs() << "\t\tfound existing device function '" << KF->getName()
-                      << "'.\n");
-    return KF;
-  }
-
-  for (auto &DF : *LDM) {
-    std::string DFName = DF.getName().str();
-    auto Match =
-        std::mismatch(NVPrefix.begin(), NVPrefix.end(), DFName.begin());
-    auto BaseName = DFName.substr(Match.second - DFName.begin());
-    if (BaseName == FnName) {
-      LLVM_DEBUG(dbgs() << "Found libdevice function: '" << DF.getName()
-                        << "' to resolve function '" << FnName << "'.\n");
-      return &DF;
-    }
-  }
-  return nullptr;
 }
 
 void CudaLoop::transformForPTX(Function &F) {
@@ -1489,16 +1554,16 @@ void CudaLoop::transformForPTX(Function &F) {
   for (auto CI : Replaced)
     CI->eraseFromParent();
 
-  if (KeepIntermediateFiles) {
-    std::error_code EC;
-    std::unique_ptr<ToolOutputFile> KernelIRFile;
-    SmallString<255> IRFileName(Twine(F.getName()).str() + "-ptx");
-    sys::path::replace_extension(IRFileName, ".ll");
-    KernelIRFile = std::make_unique<ToolOutputFile>(
-        IRFileName, EC, sys::fs::OpenFlags::OF_None);
-    KernelModule.print(KernelIRFile->os(), nullptr);
-    KernelIRFile->keep();
-  }
+  // if (KeepIntermediateFiles) {
+  //   std::error_code EC;
+  //   std::unique_ptr<ToolOutputFile> KernelIRFile;
+  //   SmallString<255> IRFileName(Twine(F.getName()).str() + "-ptx");
+  //   sys::path::replace_extension(IRFileName, ".ll");
+  //   KernelIRFile = std::make_unique<ToolOutputFile>(
+  //       IRFileName, EC, sys::fs::OpenFlags::OF_None);
+  //   KernelModule.print(KernelIRFile->os(), nullptr);
+  //   KernelIRFile->keep();
+  // }
 }
 
 void CudaLoop::remapData(ValueToValueMapTy &VMap) {
