@@ -239,7 +239,8 @@ void __kitcuda_get_occ_launch_params(size_t trip_count, CUfunction cu_func,
     // at that number in comparison to the number of SMs.
     int block_count = (trip_count + threads_per_blk - 1) / threads_per_blk;
     float sm_load = ((float)block_count / num_multiprocs) * 100.0;
-
+    bool memory_bound = (4 * inst_mix->num_memory_ops >
+                         2 * inst_mix->num_flops + inst_mix->num_iops);
     if (__kitrt_verbose_mode()) {
       fprintf(stderr,
               "kitcuda: Kernel Launch SM Load Details --------------\n");
@@ -247,6 +248,9 @@ void __kitcuda_get_occ_launch_params(size_t trip_count, CUfunction cu_func,
       fprintf(stderr, "  Kernel trip count:    %ld\n", trip_count);
       fprintf(stderr, "  Occupancy-driven TPB: %d\n", threads_per_blk);
       fprintf(stderr, "  SM utilization:  %3.2f%%\n", sm_load);
+      fprintf(stderr, "  Memory ops:           %ld\n", inst_mix->num_memory_ops);
+      fprintf(stderr, "  FLOPS:                %ld\n", inst_mix->num_flops);
+      fprintf(stderr, "  IOPS:                 %ld\n", inst_mix->num_iops);
     }
     // If we are under-utilizing the available SMs on the GPU we reduce the
     // threads-per-block count until we hit a decent utilization (i.e., we
@@ -257,7 +261,7 @@ void __kitcuda_get_occ_launch_params(size_t trip_count, CUfunction cu_func,
     //
     // As a starting point we will adjust launch parameters if we are utilizing
     // less than 75% of the GPU's SMs.  TODO: Make this a tweak-able parameter?
-    if (sm_load < 75) {
+    if (sm_load < 75 || (memory_bound && sm_load < 250)) {
       if (__kitrt_verbose_mode())
         fprintf(stderr,
                 "  ***-GPU is underutilized -- adjusting block size...\n");
@@ -265,7 +269,9 @@ void __kitcuda_get_occ_launch_params(size_t trip_count, CUfunction cu_func,
       int warp_size = 0;
       CU_SAFE_CALL(cuDeviceGetAttribute_p(
           &warp_size, CU_DEVICE_ATTRIBUTE_WARP_SIZE, _kitcuda_device_id));
-      while (block_count < num_multiprocs && threads_per_blk > warp_size) {
+      int target_multiprocs =
+          memory_bound ? 3 * num_multiprocs : 2 * num_multiprocs;
+      while (block_count < target_multiprocs && threads_per_blk > warp_size) {
         threads_per_blk = next_lowest_factor(threads_per_blk, warp_size);
         block_count = (trip_count + threads_per_blk - 1) / threads_per_blk;
         sm_load = ((float)block_count / num_multiprocs) * 100.0;
@@ -421,6 +427,73 @@ void *__kitcuda_launch_kernel(const void *fat_bin, const char *kernel_name,
   return (void *)cu_stream;
 }
 
+extern "C" { // Taken from cheetah
+typedef void (*__cilk_identity_fn)(void *);
+typedef void (*__cilk_reduce_fn)(void *, void *);
+
+void *__cilkrts_reducer_lookup(void *key, size_t size, __cilk_identity_fn id,
+                               __cilk_reduce_fn reduce);
+void __cilkrts_reducer_register(void *key, size_t size, __cilk_identity_fn id,
+                                __cilk_reduce_fn reduce);
+void __cilkrts_reducer_unregister(void *key);
+}
+
+struct KitCudaScannerMem {
+  void *aggregate = nullptr;
+  void *inclusive_prefix = nullptr;
+  void *scan_state = nullptr;
+  CUstream stream = nullptr;
+  uint64_t size = 0;
+  int blks_per_grid = 0;
+
+  void init(CUstream _stream, uint64_t _size, int _blks_per_grid) {
+    if (stream != _stream || size != _size || blks_per_grid != _blks_per_grid) {
+      free();
+
+      stream = _stream;
+      size = _size;
+      blks_per_grid = _blks_per_grid;
+
+      CU_SAFE_CALL(cuMemAllocAsync_p((CUdeviceptr *)&aggregate,
+                                     size * blks_per_grid, stream))
+      CU_SAFE_CALL(cuMemAllocAsync_p((CUdeviceptr *)&inclusive_prefix,
+                                     size * blks_per_grid, stream))
+      CU_SAFE_CALL(cuMemAllocAsync_p((CUdeviceptr *)&scan_state,
+                                     sizeof(int32_t) * blks_per_grid, stream))
+    }
+  }
+
+  void free() {
+    if (aggregate) {
+      CU_SAFE_CALL(cuMemFreeAsync_p((CUdeviceptr)aggregate, stream));
+      aggregate = nullptr;
+    }
+    if (inclusive_prefix) {
+      CU_SAFE_CALL(cuMemFreeAsync_p((CUdeviceptr)inclusive_prefix, stream));
+      inclusive_prefix = nullptr;
+    }
+    if (scan_state) {
+      CU_SAFE_CALL(cuMemFreeAsync_p((CUdeviceptr)scan_state, stream));
+      scan_state = nullptr;
+    }
+    stream = nullptr;
+    size = 0;
+    blks_per_grid = 0;
+  }
+
+  static void identity(void *v) {
+    new (v) KitCudaScannerMem;
+    fprintf(stderr, "KitCudaScannerMem::identity\n");
+  }
+
+  static void reduce(void *l, void *r) {
+    auto *rscanmem = reinterpret_cast<KitCudaScannerMem *>(r);
+    rscanmem->free();
+  }
+};
+
+static KitCudaScannerMem _kitcuda_scanner_mem;
+
 void __kitcuda_alloc_scanner(const void *fat_bin, const char *kernel_name,
                              uint64_t trip_count, const KitRTInstMix *inst_mix,
                              uint64_t size, void **aggregate,
@@ -465,12 +538,20 @@ void __kitcuda_alloc_scanner(const void *fat_bin, const char *kernel_name,
   __kitcuda_get_launch_params(trip_count, cu_func, threads_per_blk,
                               blks_per_grid, inst_mix);
   CUstream cu_stream = (CUstream)__kitcuda_get_thread_stream();
-  CU_SAFE_CALL(cuMemAllocAsync_p((CUdeviceptr *)aggregate, size * blks_per_grid,
-                                 cu_stream))
-  CU_SAFE_CALL(cuMemAllocAsync_p((CUdeviceptr *)inclusive_prefix,
-                                 size * blks_per_grid, cu_stream))
-  CU_SAFE_CALL(cuMemAllocAsync_p((CUdeviceptr *)scan_state,
-                                 sizeof(int32_t) * blks_per_grid, cu_stream))
+  // CU_SAFE_CALL(cuMemAllocAsync_p((CUdeviceptr *)aggregate, size * blks_per_grid,
+  //                                cu_stream))
+  // CU_SAFE_CALL(cuMemAllocAsync_p((CUdeviceptr *)inclusive_prefix,
+  //                                size * blks_per_grid, cu_stream))
+  // CU_SAFE_CALL(cuMemAllocAsync_p((CUdeviceptr *)scan_state,
+  //                                sizeof(int32_t) * blks_per_grid, cu_stream))
+  auto *scanmem =
+      reinterpret_cast<KitCudaScannerMem *>(__cilkrts_reducer_lookup(
+          &_kitcuda_scanner_mem, sizeof(_kitcuda_scanner_mem),
+          KitCudaScannerMem::identity, KitCudaScannerMem::reduce));
+  scanmem->init(cu_stream, size, blks_per_grid);
+  *aggregate = scanmem->aggregate;
+  *inclusive_prefix = scanmem->inclusive_prefix;
+  *scan_state = scanmem->scan_state;
   CU_SAFE_CALL(cuMemsetD8Async_p((CUdeviceptr)*scan_state, 0,
                                  sizeof(int32_t) * blks_per_grid, cu_stream))
   KIT_NVTX_POP();
@@ -484,10 +565,11 @@ void __kitcuda_free_scanner(void *aggregate, void *inclusive_prefix,
   assert(scan_state && "kitcuda: free scanner with null scan state!");
 
   KIT_NVTX_PUSH("kitcuda:free_scanner", KIT_NVTX_LAUNCH);
+
   CUstream cu_stream = (CUstream)__kitcuda_get_thread_stream();
-  CU_SAFE_CALL(cuMemFreeAsync_p((CUdeviceptr)aggregate, cu_stream));
-  CU_SAFE_CALL(cuMemFreeAsync_p((CUdeviceptr)inclusive_prefix, cu_stream));
-  CU_SAFE_CALL(cuMemFreeAsync_p((CUdeviceptr)scan_state, cu_stream));
+  // CU_SAFE_CALL(cuMemFreeAsync_p((CUdeviceptr)aggregate, cu_stream));
+  // CU_SAFE_CALL(cuMemFreeAsync_p((CUdeviceptr)inclusive_prefix, cu_stream));
+  // CU_SAFE_CALL(cuMemFreeAsync_p((CUdeviceptr)scan_state, cu_stream));
   KIT_NVTX_POP();
 }
 

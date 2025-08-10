@@ -401,6 +401,8 @@ void *__kitcuda_mem_gpu_prefetch(void *vp, void *opaque_stream) {
     // We are cooked
     fprintf(stderr, "kitcuda: warning, prefetching unmanaged memory: %p\n", vp);
   }*/
+  else if (__kitrt_verbose_mode())
+    fprintf(stderr, "kitrt: memory at %p already prefetched.\n", vp);
   KIT_NVTX_POP();
   // no prefetch, no bound stream to bound it to...
   return nullptr;

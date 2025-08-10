@@ -66,6 +66,7 @@
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/DebugInfoMetadata.h"
+#include "llvm/IR/DebugLoc.h"
 #include "llvm/IR/FMF.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IRBuilder.h"
@@ -895,7 +896,7 @@ void CudaLoop::postProcessOutline(TapirLoopInfo &TLI, TaskOutlineInfo &Out,
 
   fixReducersInKernel(KernelF, ThreadIdx, BlockDim, VMap);
   fixScannersInKernel(KernelF, End, VMap);
-  // fixDebugInfoInKernel(KernelF);
+  fixDebugInfoInKernel(KernelF);
 
   if (KeepIntermediateFiles) {
     std::error_code EC;
@@ -1249,7 +1250,7 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
     for (auto [Ptr, Info] : ReducedVars)
       ReductionTrees.back().emplace_back(Ptr, Info);
   }
-
+  IRBuilder<> AllocaInserter(Entry->getTerminator());
   for (const auto &CurReducedVars : ReductionTrees) {
     // Let's do a warp-wide reduction first
     const auto TreeReduce = [&](std::string Prefix, size_t Size) {
@@ -1257,7 +1258,7 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
       for (size_t Delta = 1; Delta < Size; Delta *= 2) {
         std::string LoopName = Prefix + "_reduce_" + std::to_string(Delta);
         for (auto &[Ptr, Info] : CurReducedVars) {
-          AllocaInst *DownAlloca = B.CreateAlloca(Info.Type);
+          AllocaInst *DownAlloca = AllocaInserter.CreateAlloca(Info.Type);
           // Do a warp shuffle down
           Constant *MaskArg = ConstantInt::get(Int32Ty, Mask);
           Constant *DeltaArg = ConstantInt::get(Int32Ty, Delta);
@@ -1298,10 +1299,11 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
                    Info.Type->getArrayElementType()->isIntegerTy(32));
             // Reference:
             // https://github.com/NVIDIA/cub/blob/0fc3c3701632a4be906765b73be20a9ad0da603d/cub/util_ptx.cuh#L615
+            Type *ElTy = Info.Type->getArrayElementType();
             for (size_t Idx = 0; Idx < Info.Type->getArrayNumElements();
                  Idx++) {
               Value *LocalWord =
-                  B.CreateLoad(Int32Ty, B.CreateConstInBoundsGEP2_32(
+                  B.CreateLoad(ElTy, B.CreateConstInBoundsGEP2_32(
                                             Info.Type, Info.LocalPtr, 0, Idx));
               Value *Shuffled = WarpShuffleDown(LocalWord);
               B.CreateStore(Shuffled, B.CreateConstInBoundsGEP2_32(
@@ -1462,8 +1464,8 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
       for (auto &[Ptr, Info] : CurReducedVars) {
         if (Info.Type->isIntegerTy()) {
           // Write a CAS loop to write the local copy to global memory
-          Value *OldPtr = B.CreateAlloca(Info.Type);
-          Value *NewPtr = B.CreateAlloca(Info.Type);
+          Value *OldPtr = AllocaInserter.CreateAlloca(Info.Type);
+          Value *NewPtr = AllocaInserter.CreateAlloca(Info.Type);
           BasicBlock *LoopBB = BasicBlock::Create(
               KernelF->getContext(),
               "blk_reduce_write_loop_" + Ptr->getName().str(), KernelF);
@@ -1484,7 +1486,7 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
             Value *CASResult = B.CreateAtomicCmpXchg(
                 Ptr, OldVal, B.CreateLoad(Info.Type, NewPtr),
                 MaybeAlign(Info.Size), AtomicOrdering::SequentiallyConsistent,
-                AtomicOrdering::SequentiallyConsistent);
+                AtomicOrdering::Monotonic);
             Value *CASOldVal = B.CreateExtractValue(CASResult, 0);
             Value *CASSuccess = B.CreateExtractValue(CASResult, 1);
             OldVal->addIncoming(CASOldVal, LoopBB);
@@ -1510,7 +1512,7 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
                 MutexPtr, ConstantInt::get(Int32Ty, 0),
                 ConstantInt::get(Int32Ty, 1), MaybeAlign(4),
                 AtomicOrdering::SequentiallyConsistent,
-                AtomicOrdering::SequentiallyConsistent);
+                AtomicOrdering::Monotonic);
             Value *CASSuccess = B.CreateExtractValue(CASResult, 1);
             B.CreateCondBr(CASSuccess, DoneBB, LoopBB);
           }
@@ -1549,6 +1551,8 @@ void CudaLoop::fixScannersInKernel(Function *KernelF, Value *TripCount,
       if (auto *ConstSize = dyn_cast<ConstantInt>(Call->getArgOperand(0))) {
         Size = ConstSize->getZExtValue();
       }
+      LLVM_DEBUG(dbgs() << "Found size " << Size << ", Call " << *Call
+                        << ", operand 0 " << *Call->getArgOperand(0) << "\n");
       assert(Size > 0 && Size % sizeof(int32_t) == 0 &&
              "cuabi: scanner variable has invalid size");
       size_t NumI32s = Size / sizeof(int32_t);
@@ -2156,8 +2160,8 @@ void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
       ConstantInt::get(Int64Ty, InstMix.num_flops),
       ConstantInt::get(Int64Ty, InstMix.num_iops));
 
-  AllocaInst *AI = NewBuilder.CreateAlloca(KernelInstMixTy);
-  NewBuilder.CreateStore(InstructionMix, AI);
+  AllocaInst *AI = EntryBuilder.CreateAlloca(KernelInstMixTy);
+  EntryBuilder.CreateStore(InstructionMix, AI);
 
   LLVM_DEBUG(dbgs() << "\t*- code gen kernel launch....\n");
   Value *KSPtr = NewBuilder.CreateLoad(VoidPtrTy, CudaStream);
@@ -2200,8 +2204,8 @@ void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
         ScannerAllocCall->setArgOperand(2, CastTripCount);
         ScannerAllocCall->setArgOperand(3, AI);
       }
-      // Move AI to befoer teh first ScannerAllocCall
-      AI->moveBefore(ScannerAllocCalls.front());
+      // // Move AI to before the first ScannerAllocCall
+      // AI->moveBefore(ScannerAllocCalls.front());
     }
   }
   TOI.ReplCall->eraseFromParent();
@@ -3217,7 +3221,7 @@ CudaABIOutputFile CudaABI::generatePTX() {
 
     ModulePassManager MPM =
         PB.buildPerModuleDefaultPipeline(OptLevels[OptLevel]);
-    MPM.addPass(StripSymbolsPass());
+    // MPM.addPass(StripSymbolsPass());
     MPM.addPass(VerifierPass());
     // MPM.printPipeline(dbgs(), [](StringRef Name) { return Name; });
     LLVM_DEBUG(dbgs() << "\t\t* module: " << KernelModule.getName() << "\n");
@@ -3244,14 +3248,14 @@ CudaABIOutputFile CudaABI::generatePTX() {
     case DICompileUnit::DebugDirectivesOnly:
     case DICompileUnit::LineTablesOnly:
     case DICompileUnit::FullDebug:
-      CU->setEmissionKind(DICompileUnit::DebugDirectivesOnly);
+      CU->setEmissionKind(DICompileUnit::NoDebug /*DebugDirectivesOnly*/);
       break;
     }
   }
 
   // Hack: strip debug symbols because apparently some NVPTX internal lowering
   // passes handle them incorrectly... Don't have time to fix NVPTX internals.
-  StripDebugInfo(KernelModule);
+  // StripDebugInfo(KernelModule);
 
   // Setup the passes and request that the output goes to the
   // specified PTX file.
