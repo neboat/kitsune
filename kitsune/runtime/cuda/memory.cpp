@@ -590,4 +590,9 @@ void __kitcuda_memset(void *dst, uint8_t value, size_t size) {
     memset(dst, value, size);
   }
 }
+
+void __kitcuda_copy(void *dst, const void *src, size_t size) {
+  CU_SAFE_CALL(cuMemcpy_p(reinterpret_cast<CUdeviceptr>(dst),
+                          reinterpret_cast<CUdeviceptr>(src), size));
+}
 }

@@ -9,9 +9,10 @@
 #ifndef __KITSUNE_KITSUNE_H__
 #define __KITSUNE_KITSUNE_H__
 
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stddef.h>
+#include <string.h>
 
 // #if defined(spawn)
 // // FIXME KITSUNE: Should this be an error instead of a warning?
@@ -76,6 +77,11 @@
     // fprintf(stderr, "kit_realloc(%p, %ld) -> __kitcuda_mem_realloc_managed\n", ptr, size);
     return __kitcuda_mem_realloc_managed(ptr, size);
   }
+  extern "C" void __kitcuda_copy(void *dst, const void *src, size_t size);
+  inline __attribute__((always_inline))
+  void kit_copy(void *dst, const void *src, size_t size) {
+    return __kitcuda_copy(dst, src, size);
+  }
 #elif defined(_tapir_hip_target)
   #ifdef __cplusplus
     extern "C" __attribute__((malloc)) void* __kithip_mem_alloc_managed(size_t);
@@ -107,6 +113,11 @@
   inline __attribute__((always_inline))
   void *kit_realloc(void *ptr, size_t size) {
     return __kithip_mem_realloc_managed(ptr, size);
+  }
+  extern "C" void __kithip_copy(void *dst, const void *src, size_t size);
+  inline __attribute__((always_inline))
+  void kit_copy(void *dst, const void *src, size_t size) {
+    return __kithip_copy(dst, src, size);
   }
 #else
   #ifdef __cplusplus
@@ -149,6 +160,10 @@
   void *kit_realloc(void *ptr, size_t size) {
     // fprintf(stderr, "kit_realloc(%p, %ld) -> __kitrt_default_mem_realloc\n", ptr, size);
     return __kitrt_default_mem_realloc(ptr, size);
+  }
+  inline __attribute__((always_inline))
+  void *kit_copy(void *dst, const void *src, size_t size) {
+    memcpy(dst, src, size);
   }
 #endif // cpu targets
 
