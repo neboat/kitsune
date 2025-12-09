@@ -51,9 +51,7 @@ static GlobalVariable *createEmbBCGlobal(const Module &m, Module &hostM) {
 }
 
 static GlobalVariable *createEmbFBGlobal(MemoryBufferRef buf, Module &m) {
-  // The linkage of the global variable is external to prevent it from being
-  // DCE'ed.
-  GlobalValue::LinkageTypes linkage = GlobalValue::ExternalLinkage;
+  GlobalValue::LinkageTypes linkage = GlobalValue::InternalLinkage;
   StringRef data = buf.getBuffer();
   LLVMContext &ctx = m.getContext();
   Constant *init = ConstantDataArray::getString(ctx, data, /*AddNull=*/false);
