@@ -20,6 +20,7 @@
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/IR/GlobalValue.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
@@ -203,7 +204,10 @@ private:
         continue;
 
       GlobalVariable *hostG = m.getGlobalVariable(devG.getName());
-      assert(hostG && "Could not find corresponding global on host");
+      if (not hostG)
+        // This global variable might be local to the kernel module, such as for
+        // an array of device-side shared memory.
+        continue;
 
       uint64_t size = dl.getTypeAllocSize(hostG->getType());
 
