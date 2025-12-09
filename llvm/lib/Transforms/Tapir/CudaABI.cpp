@@ -219,6 +219,206 @@ CudaLoop::~CudaLoop() {
                     << KernelName << "'.\n");
 }
 
+namespace {
+const size_t MaxNumWarps = 32;
+
+BasicBlock *getUniqueExitBlock(Function *KernelF) {
+  SmallSet<BasicBlock *, 8> Terminators;
+  for (BasicBlock &BB : *KernelF) {
+    if (isa<ReturnInst>(BB.getTerminator())) {
+      Terminators.insert(&BB);
+    }
+  }
+  if (Terminators.size() == 1) {
+    return *Terminators.begin();
+  }
+  // This branch is probably here just for correctness. It seems that Kernel
+  // functions outlined by LoopSpawning already have a single exit block. But
+  // in the rare event that it does not, create a new exit block and link all
+  // terminators to it.
+  BasicBlock *NewExit =
+      BasicBlock::Create(KernelF->getContext(), "exit", KernelF);
+  for (BasicBlock *T : Terminators) {
+    ReplaceInstWithInst(T->getTerminator(), BranchInst::Create(NewExit));
+  }
+  return NewExit;
+}
+
+std::pair<DebugLoc, DebugLoc> getFirstAndLastDebugLoc(Function *F) {
+  DebugLoc FirstLoc;
+  DebugLoc LastLoc;
+  for (BasicBlock &BB : *F) {
+    for (Instruction &I : BB) {
+      if (auto Loc = I.getDebugLoc()) {
+        unsigned Line = Loc->getLine();
+        unsigned Col = Loc->getColumn();
+        if (!FirstLoc || Line < FirstLoc->getLine() ||
+            (Line == FirstLoc->getLine() && Col < FirstLoc->getColumn())) {
+          FirstLoc = Loc;
+        }
+        if (!LastLoc || Line > LastLoc->getLine() ||
+            (Line == LastLoc->getLine() && Col > LastLoc->getColumn())) {
+          LastLoc = Loc;
+        }
+      }
+    }
+  }
+  return {FirstLoc, LastLoc};
+}
+
+} // namespace
+
+void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
+                                   Value *BlockDim, ValueToValueMapTy &VMap) {
+  struct ReductionVarInfo {
+    Value *LocalPtr; // Holds the thread-local copy of the reduction variable
+    Value *TempPtr;
+    size_t Size;
+    Function *IdFn;
+    Function *MergeFn;
+    Type *Type;
+    SmallSet<Instruction *, 8> HyperLookups;
+    GlobalVariable *SharedPtr;
+  };
+
+  ValueMap<Value *, ReductionVarInfo> ReducedVars;
+  // Identify all reduction variables in the kernel.
+  for (BasicBlock &BB : *KernelF) {
+    for (Instruction &I : BB) {
+      if (auto *Call = dyn_cast<CallInst>(&I)) {
+        if (!isTapirIntrinsic(Intrinsic::hyper_lookup, &I))
+          continue;
+
+        // Extract information for this reducer.
+        Value *Ptr = Call->getOperand(0);
+        size_t Size = 0;
+        if (auto *ConstSize = dyn_cast<ConstantInt>(Call->getOperand(1))) {
+          Size = ConstSize->getZExtValue();
+        }
+        Function *IdFn = dyn_cast<Function>(Call->getOperand(2));
+        Function *MergeFn = dyn_cast<Function>(Call->getOperand(3));
+        assert(Size > 0 && IdFn && MergeFn &&
+               "cuabi: reduction variable has invalid size, identity "
+               "function, or merge function");
+        if (auto It = ReducedVars.find(Ptr); It != ReducedVars.end()) {
+          ReductionVarInfo &Record = It->second;
+          assert(Size == Record.Size && IdFn == Record.IdFn &&
+                 MergeFn == Record.MergeFn &&
+                 "cuabi: reduction variable has inconsistent "
+                 "size, identity function, or merge function");
+        } else {
+          Type *ReducerType;
+          if (Size <= 8) {
+            // Use in-register integers for better performance.
+            ReducerType =
+                Type::getIntNTy(KernelF->getContext(), bit_ceil(Size) * 8);
+          } else {
+            // Use array type for larger types. This is always correct.  Backend
+            // may of course optimize it into registers.  Use int32 instead of
+            // int8 because that's the native type for CUDA.
+            size_t NumI32s = (Size + sizeof(int32_t) - 1) / sizeof(int32_t);
+            ReducerType = ArrayType::get(
+                Type::getInt32Ty(KernelF->getContext()), NumI32s);
+          }
+          ReductionVarInfo Record = {nullptr, nullptr,     Size, IdFn,
+                                     MergeFn, ReducerType, {},   nullptr};
+          ReducedVars[Ptr] = Record;
+        }
+        ReducedVars[Ptr].HyperLookups.insert(Call);
+      }
+    }
+  }
+
+  if (ReducedVars.empty()) {
+    LLVM_DEBUG(dbgs() << "cuabi: no reduction variables found in kernel\n");
+    return;
+  }
+
+  for (auto [Ptr, Info] : ReducedVars) {
+    // What a hack, should have done it in preProcessTapirLoop but whatever.
+    const auto VMapReverseLookup = [&VMap](Value *Target) -> Value * {
+      for (auto [K, V] : VMap) {
+        if (V == Target)
+          return const_cast<Value *>(K);
+      }
+      return nullptr;
+    };
+    Value *HostPtr = VMapReverseLookup(Ptr);
+    Function *HostIdFn = dyn_cast<Function>(VMapReverseLookup(Info.IdFn));
+    Function *HostMergeFn = dyn_cast<Function>(VMapReverseLookup(Info.MergeFn));
+    ReducerInputs[HostPtr] = {Info.Size, HostIdFn, HostMergeFn};
+  }
+
+  BasicBlock *Entry = &KernelF->getEntryBlock();
+  BasicBlock *Exit = getUniqueExitBlock(KernelF);
+
+  // To fix "inlinable function call in a function with debug info must have a
+  // !dbg location" error, we need to attach Id and Merge calls with debug
+  // locations in this function. So get the first and last debug locations in
+  // the kernel. Id call inserted at the entry block is given the first debug
+  // location, and the merge calls inserted at the exit block are given the last
+  // debug location.
+  const auto FirstAndLastLoc = getFirstAndLastDebugLoc(KernelF);
+
+  auto *PtrTy = PointerType::get(KernelModule.getContext(), 0);
+  auto *Int32Ty = Type::getInt32Ty(KernelF->getContext());
+  auto *Int64Ty = Type::getInt64Ty(KernelModule.getContext());
+  auto *VoidTy = Type::getVoidTy(KernelModule.getContext());
+  FunctionCallee KitCudaReduceFn = KernelModule.getOrInsertFunction(
+      "__kitcuda_reduce", /* returns */ VoidTy, /* view */ PtrTy,
+      /* temp */ PtrTy, /* shmem */ PtrTy, /* size */ Int64Ty,
+      /* result */ PtrTy, /* mutex */ PtrTy, // /* n */ Int64Ty,
+      /* identity */ PtrTy, /* reduce */ PtrTy);
+
+  IRBuilder<> EntryInserter(Entry->getTerminator());
+  IRBuilder<> ExitInserter(Exit->getTerminator());
+
+  // Insert alloca instructions to create thread-local copies for all reduction
+  // variables.
+  for (auto [Ptr, Info] : ReducedVars) {
+    // Cilk reducers are type-erased, so we need to come up with a reasonable
+    // type.
+    Info.LocalPtr = EntryInserter.CreateAlloca(Info.Type);
+    Info.TempPtr = EntryInserter.CreateAlloca(Info.Type);
+    // Now insert a call to the identity function pointer to initialize the
+    // local copy.
+    CallInst *IdCall = EntryInserter.CreateCall(Info.IdFn, {Info.LocalPtr});
+    IdCall->setDebugLoc(FirstAndLastLoc.first);
+    // Also create a shared memory array for the function for block-wide
+    // reduction. Use 32 because CUDA supports up to 32 warps
+    ArrayType *ArrayTy = ArrayType::get(Info.Type, MaxNumWarps);
+    std::string ArrayName =
+        KernelF->getName().str() + ".blk_red_array." + Ptr->getName().str();
+    GlobalVariable *Array = new GlobalVariable(
+        KernelModule, ArrayTy, false, GlobalValue::InternalLinkage,
+        UndefValue::get(ArrayTy), ArrayName, nullptr,
+        GlobalVariable::NotThreadLocal, 3);
+    Info.SharedPtr = Array;
+  }
+  // Replace all uses of the reduction variables with the thread-local copies.
+  for (auto [Ptr, Info] : ReducedVars) {
+    for (Instruction *HyperLookup : Info.HyperLookups) {
+      HyperLookup->replaceAllUsesWith(Info.LocalPtr);
+      HyperLookup->eraseFromParent();
+    }
+  }
+  // Now generate reduction code at exit block
+  for (auto [Ptr, Info] : ReducedVars) {
+    // Host-side will allocate a mutex right after the global view, if it's
+    // needed.
+    Value *MutexPtr = Info.Type->isIntegerTy()
+                          ? ConstantPointerNull::get(PtrTy)
+                          : ExitInserter.CreateConstGEP1_32(
+                                Int32Ty, Ptr, Info.Type->getArrayNumElements());
+    Value *Shmem = ExitInserter.CreateAddrSpaceCast(Info.SharedPtr, PtrTy);
+    CallInst *ReduceCall = ExitInserter.CreateCall(
+        KitCudaReduceFn, {Info.LocalPtr, Info.TempPtr, Shmem,
+                          ConstantInt::get(Int64Ty, Info.Size), Ptr, MutexPtr,
+                          Info.IdFn, Info.MergeFn});
+    ReduceCall->setDebugLoc(FirstAndLastLoc.second);
+  }
+}
+
 void CudaLoop::preProcessTapirLoop(TapirLoopInfo &TL,
                                    ValueToValueMapTy &FVMap) {
   LLVM_DEBUG(dbgs() << "debug[cuabi]: -preprocessing loop for kernel '"
@@ -390,6 +590,9 @@ void CudaLoop::postProcessOutline(TapirLoopInfo &TLI, TaskOutlineInfo &Out,
   assert(ClonedCond->getOperand(TripCountIdx) == End &&
          "End argument not used in condition!");
   ClonedCond->setOperand(TripCountIdx, ThreadEnd);
+
+  fixReducersInKernel(KernelF, ThreadIdx, BlockDim, VMap);
+}
 }
 
 void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
@@ -433,10 +636,31 @@ void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
   // before the kernel is launched.
   copyNonConstGlobalsHToD(UsedGlobalValues, TTID::Cuda, M, Builder);
 
+  // Get stream argument.
   Value *CudaStream =
       Builder.CreateIntrinsic(PtrTy, Intrinsic::kit_thread_stream, {CTT});
   std::vector<Value *> Args = {CTT, EmbFB,  KName,     TripCount,
                                TPB, KProps, CudaStream};
+
+  // Replace reducer inputs with calls to Kitsune hyperobject intrinsics.
+  SmallVector<std::tuple<Value *, Value *>> ReducerInputsHost;
+  ValueToValueMapTy ViewToReducerMap;
+  // Add a host-side hyper.lookup intrinsic for each reducer input.
+  for (unsigned ArgIdx = 0; ArgIdx < CallOutlined->arg_size(); ++ArgIdx) {
+    Value *Inp = CallOutlined->getArgOperand(ArgIdx);
+    if (!ReducerInputs.contains(Inp))
+      continue;
+
+    auto Info = ReducerInputs[Inp];
+    Value *HostLookup =
+        Builder.CreateIntrinsic(PtrTy, Intrinsic::kit_reducer_setup,
+                                {Inp, ConstantInt::get(Int64Ty, Info.Size),
+                                 Info.IdFn, Info.MergeFn, CudaStream});
+    ViewToReducerMap[HostLookup] = Inp;
+    CallOutlined->setArgOperand(ArgIdx, HostLookup);
+    ReducerInputsHost.push_back({Inp, HostLookup});
+  }
+
   for (Value *Inp : CallOutlined->args())
     Args.push_back(Inp);
 
@@ -445,11 +669,19 @@ void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
   // analyses to eliminate/delay device synchronization calls instead of
   // always synchronizing immediately after the kernel launch.
   LLVM_DEBUG(dbgs() << "\t*- code gen kernel launch....\n");
-  (void)Builder.CreateCall(
+  Builder.CreateCall(
       Intrinsic::getOrInsertDeclaration(&M, Intrinsic::kit_async_launch_kernel),
       Args);
-  (void)Builder.CreateIntrinsic(VoidTy, Intrinsic::kit_sync_stream,
-                                {CTT, CudaStream});
+  Builder.CreateIntrinsic(VoidTy, Intrinsic::kit_sync_stream,
+                          {CTT, CudaStream});
+  // Synchronize any reducers used in the kernel back onto the host.
+  for (auto &[Reducer, HostLookup] : ReducerInputsHost) {
+    auto Info = ReducerInputs[Reducer];
+    Builder.CreateIntrinsic(VoidTy, Intrinsic::kit_reducer_sync,
+                            {HostLookup, Reducer,
+                             ConstantInt::get(Int64Ty, Info.Size), Info.IdFn,
+                             Info.MergeFn, CudaStream});
+  }
 
   // After the kernel is done, copy the non-const globals back to the host. This
   // is done here to keep this part of the code generation simple. A subsequent

@@ -114,6 +114,7 @@ DECLARE_DLSYM(cuModuleGetGlobal_v2);
 DECLARE_DLSYM(cuMemAllocManaged);
 DECLARE_DLSYM(cuMemAllocHost);
 DECLARE_DLSYM(cuMemHostAlloc);
+DECLARE_DLSYM(cuMemAlloc_v2);
 DECLARE_DLSYM(cuMemsetD8Async);
 DECLARE_DLSYM(cuMemFree_v2);
 DECLARE_DLSYM(cuMemPrefetchAsync);
@@ -122,6 +123,8 @@ DECLARE_DLSYM(cuPointerGetAttribute);
 DECLARE_DLSYM(cuPointerSetAttribute);
 DECLARE_DLSYM(cuMemcpy);
 DECLARE_DLSYM(cuMemcpyHtoD);
+DECLARE_DLSYM(cuMemcpyHtoDAsync_v2);
+DECLARE_DLSYM(cuMemcpyDtoHAsync_v2);
 
 /* Error handling */
 DECLARE_DLSYM(cuGetErrorName);

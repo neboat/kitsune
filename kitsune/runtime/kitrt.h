@@ -59,11 +59,17 @@
 #include <cstring>
 #include <ctype.h>
 #include <execinfo.h>
+#include <functional>
 #include <stdint.h>
 #include <stdlib.h>
 #include <type_traits>
+#include <unordered_set>
 
 #ifdef __cplusplus
+#include <deque>
+#include <limits>
+#include <string>
+#include <vector>
 extern "C" {
 #else
 #include <stdbool.h>
@@ -222,5 +228,124 @@ inline void __kitrt_unset_env(const char *varname) {
             varname);
   }
 }
+
+extern "C" {
+void *__libc_malloc(std::size_t size);
+
+void __libc_free(void *ptr);
+}
+
+namespace kitrt {
+
+template <typename T> class GlibcAllocator {
+public:
+  // Standard allocator typedefs
+  using value_type = T;
+  using pointer = T *;
+  using const_pointer = const T *;
+  using reference = T &;
+  using const_reference = const T &;
+  using size_type = std::size_t;
+  using difference_type = std::ptrdiff_t;
+
+  // Rebind allocator to type U
+  template <typename U> struct rebind {
+    using other = GlibcAllocator<U>;
+  };
+
+  // Default constructor
+  GlibcAllocator() noexcept {}
+
+  // Copy constructor
+  template <typename U> GlibcAllocator(const GlibcAllocator<U> &) noexcept {}
+
+  // Allocate memory
+  pointer allocate(size_type n) {
+    if (n > max_size()) {
+      throw std::bad_alloc();
+    }
+
+    if (n == 0) {
+      return nullptr;
+    }
+
+    void *ptr = __libc_malloc(n * sizeof(T));
+    if (!ptr) {
+      throw std::bad_alloc();
+    }
+
+    return static_cast<pointer>(ptr);
+  }
+
+  // Deallocate memory
+  void deallocate(pointer p, size_type) noexcept { __libc_free(p); }
+
+  // Maximum number of objects that can be allocated
+  size_type max_size() const noexcept {
+    return std::numeric_limits<size_type>::max() / sizeof(T);
+  }
+
+  // Construct object at given address
+  template <typename U, typename... Args> void construct(U *p, Args &&...args) {
+    ::new (static_cast<void *>(p)) U(std::forward<Args>(args)...);
+  }
+
+  // Destroy object at given address
+  template <typename U> void destroy(U *p) { p->~U(); }
+};
+
+// Comparison operators
+template <typename T, typename U>
+bool operator==(const GlibcAllocator<T> &, const GlibcAllocator<U> &) noexcept {
+  return true;
+}
+
+template <typename T, typename U>
+bool operator!=(const GlibcAllocator<T> &, const GlibcAllocator<U> &) noexcept {
+  return false;
+}
+
+// template <typename T>
+// using unordered_set =
+//     phmap::flat_hash_set<T, std::hash<T>, std::equal_to<T>, GlibcAllocator<T>>;
+
+// template <typename K, typename V>
+// using unordered_map =
+//     phmap::flat_hash_map<K, V, std::hash<K>, std::equal_to<K>,
+//                          GlibcAllocator<std::pair<const K, V>>>;
+
+template <typename T>
+using unordered_set =
+    std::unordered_set<T, std::hash<T>, std::equal_to<T>, GlibcAllocator<T>>;
+
+template <typename K, typename V>
+using unordered_map = std::unordered_map<K, V, std::hash<K>, std::equal_to<K>,
+                                         GlibcAllocator<std::pair<const K, V>>>;
+
+template <typename T> using deque = std::deque<T, GlibcAllocator<T>>;
+
+template <typename T> using vector = std::vector<T, GlibcAllocator<T>>;
+
+using string =
+    std::basic_string<char, std::char_traits<char>, GlibcAllocator<char>>;
+
+} // namespace kitrt
+
+// #ifdef __GLIBCXX__
+// #if __GLIBCXX__ < 20230426 // 13.1.0
+// LWG 3705: hashability of basic_string should not depend on allocator.
+// This defect report was only fixed in GCC 13.1. See
+// https://github.com/gcc-mirror/gcc/commit/b370ed0bf93ecf0ff51d29e7fc132c433b2aa1be
+// So for older versions, we need to provide our own specialization.
+namespace std {
+template <> struct hash<kitrt::string> {
+  size_t operator()(const kitrt::string &str) const {
+    return std::hash<std::string_view>()(
+        std::string_view(str.data(), str.size()));
+  }
+};
+} // namespace std
+// #endif
+// // #endif
 
 #endif // __KITRT_H__

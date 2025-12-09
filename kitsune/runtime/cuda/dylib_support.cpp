@@ -146,6 +146,7 @@ bool __kitcuda_load_symbols() {
   DLSYM_LOAD(cuMemAllocManaged);
   DLSYM_LOAD(cuMemAllocHost);
   DLSYM_LOAD(cuMemHostAlloc);
+  DLSYM_LOAD(cuMemAlloc_v2);
   DLSYM_LOAD(cuMemsetD8Async);
   DLSYM_LOAD(cuMemFree_v2);
   DLSYM_LOAD(cuMemPrefetchAsync);
@@ -154,6 +155,8 @@ bool __kitcuda_load_symbols() {
   DLSYM_LOAD(cuPointerSetAttribute);
   DLSYM_LOAD(cuMemcpy);
   DLSYM_LOAD(cuMemcpyHtoD);
+  DLSYM_LOAD(cuMemcpyHtoDAsync_v2);
+  DLSYM_LOAD(cuMemcpyDtoHAsync_v2);
 
   /* Error handling */
   DLSYM_LOAD(cuGetErrorName);

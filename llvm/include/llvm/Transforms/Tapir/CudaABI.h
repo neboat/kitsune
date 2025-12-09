@@ -154,6 +154,17 @@ private:
 
   ValueToValueMapTy &GVMap;
 
+  // Some bookkeeping for reduction variables that would allow recreation of
+  // reducer lookup call at the outlined loop call site.
+  struct ReducerOutlineLoopCallInfo {
+    size_t Size;
+    Function *IdFn;
+    Function *MergeFn;
+  };
+  // Maps a subset of OrderedInputs that are reducer variables to
+  // ReducerOutlineLoopCallInfo.
+  DenseMap<const Value *, ReducerOutlineLoopCallInfo> ReducerInputs;
+
 public:
   /// Create a loop outline processor for the cuda tapir target.
   /// @param M The host module
@@ -164,6 +175,9 @@ public:
   CudaLoop(Module &M, Module &KernelModule, const std::string &KernelName,
            ValueToValueMapTy &GVMap, const TTOptions &TTOpts);
   ~CudaLoop();
+
+  void fixReducersInKernel(Function *KernelF, Value *ThreadIdx, Value *BlockDim,
+                           ValueToValueMapTy &VMap);
 
   void preProcessTapirLoop(TapirLoopInfo &TL, ValueToValueMapTy &VMap) override;
   void postProcessOutline(TapirLoopInfo &TL, TaskOutlineInfo &Out,

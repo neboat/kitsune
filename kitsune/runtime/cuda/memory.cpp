@@ -58,6 +58,18 @@
 
 static std::mutex _kitcuda_mem_alloc_mutex;
 
+// Reducer cache
+
+struct ReducerCacheSizeClass {
+  std::mutex mutex;
+  kitrt::vector<void *> cache;
+};
+
+static constexpr size_t N_REDUCER_CACHE_SIZE_CLASSES = 32;
+static ReducerCacheSizeClass
+    _kitcuda_reducer_cache[N_REDUCER_CACHE_SIZE_CLASSES];
+
+
 extern "C" {
 
 [[gnu::malloc]] void *[[kitsune::mobile]]
@@ -68,10 +80,7 @@ __kitcuda_mem_alloc_managed(size_t size) {
   if (not _kitcuda_initialized)
     __kitcuda_initialize();
 
-  CUcontext curctx;
-  CU_SAFE_CALL(cuCtxGetCurrent_p(&curctx));
-  if (curctx == NULL)
-    CU_SAFE_CALL(cuCtxSetCurrent_p(_kitcuda_context));
+  __kitcuda_set_context();
 
   CUdeviceptr devp;
   CU_SAFE_CALL(cuMemAllocManaged_p(&devp, size, CU_MEM_ATTACH_GLOBAL));
@@ -402,6 +411,64 @@ void __kitcuda_memcpy_sym_to_host(uint64_t devPtr, void *hostPtr,
   // the time of writing, uses this - fails).
   KIT_NVTX nvtx_raii("kitcuda:memcpy_sym_to_host", KIT_NVTX_MEM);
   CU_SAFE_CALL(cuMemcpyDtoH(hostPtr, devPtr, size));
+}
+
+void *__kitcuda_mem_alloc_and_copy_to_device(void *host_ptr, size_t size,
+                                             void **dev_ptr,
+                                             void *opaque_stream) {
+  __kitcuda_set_context();
+
+  KIT_NVTX nvtx_raii("kitcuda:mem_alloc_device_and_copy", KIT_NVTX_MEM);
+  CUstream cu_stream = opaque_stream ? (CUstream)opaque_stream
+                                     : (CUstream)__kitcuda_get_thread_stream();
+
+  const size_t size_class =
+      64 - __builtin_clzll(size - 1); // Round up to nearest power of 2
+
+  if (size_class < N_REDUCER_CACHE_SIZE_CLASSES) {
+    ReducerCacheSizeClass &reducer_cache = _kitcuda_reducer_cache[size_class];
+    reducer_cache.mutex.lock();
+    if (!reducer_cache.cache.empty()) {
+      *dev_ptr = reducer_cache.cache.back();
+      reducer_cache.cache.pop_back();
+      reducer_cache.mutex.unlock();
+    } else {
+      reducer_cache.mutex.unlock();
+      CU_SAFE_CALL(cuMemAlloc_v2_p((CUdeviceptr *)dev_ptr, 1L << size_class));
+    }
+  } else {
+    // I don't think this is ever going to happen, but just in case...
+    CU_SAFE_CALL(cuMemAlloc_v2_p((CUdeviceptr *)dev_ptr, size));
+  }
+
+  CU_SAFE_CALL(
+      cuMemcpyHtoDAsync_v2_p((CUdeviceptr)*dev_ptr, host_ptr, size, cu_stream));
+  return cu_stream;
+}
+
+void *__kitcuda_mem_copy_and_free_from_device(void *host_ptr, size_t size,
+                                              void *dev_ptr,
+                                              void *opaque_stream) {
+  // Skip context check because we assume __kitcuda_mem_alloc_and_copy_to_device
+  // was called before.
+  KIT_NVTX nvtx_raii("kitcuda:mem_copy_device_and_free", KIT_NVTX_MEM);
+  CUstream cu_stream = opaque_stream ? (CUstream)opaque_stream
+                                     : (CUstream)__kitcuda_get_thread_stream();
+  CU_SAFE_CALL(
+      cuMemcpyDtoHAsync_v2_p(host_ptr, (CUdeviceptr)dev_ptr, size, cu_stream));
+
+  const size_t size_class =
+      64 - __builtin_clzll(size - 1); // Round up to nearest power of 2
+  if (size_class < N_REDUCER_CACHE_SIZE_CLASSES) {
+    ReducerCacheSizeClass &reducer_cache = _kitcuda_reducer_cache[size_class];
+    reducer_cache.mutex.lock();
+    reducer_cache.cache.push_back(dev_ptr);
+    reducer_cache.mutex.unlock();
+  } else {
+    CU_SAFE_CALL(cuMemFree_v2_p((CUdeviceptr)dev_ptr));
+  }
+
+  return cu_stream;
 }
 
 void __kitcuda_managed_memcpy(void *dst, const void *src, size_t size) {
