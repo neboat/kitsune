@@ -58,6 +58,8 @@
 
 static std::mutex _kitcuda_mem_alloc_mutex;
 
+size_t _kitcuda_memops_threshold = 4096;
+
 // Reducer cache
 
 struct ReducerCacheSizeClass {
@@ -474,5 +476,62 @@ void *__kitcuda_mem_copy_and_free_from_device(void *host_ptr, size_t size,
 void __kitcuda_managed_memcpy(void *dst, const void *src, size_t size) {
   CU_SAFE_CALL(cuMemcpy_p(reinterpret_cast<CUdeviceptr>(dst),
                           reinterpret_cast<CUdeviceptr>(src), size));
+}
+
+void __kitcuda_memcpy(void *dst, void *src, size_t size) {
+  // For now, just use the host memcpy.
+  if (size < _kitcuda_memops_threshold) {
+    // Small memcpy, use the host memcpy anyways because a pagefault doesn't
+    // hurt as much.
+    memcpy(dst, src, size);
+    return;
+  }
+  extern bool _kitcuda_initialized;
+  if (not _kitcuda_initialized)
+    __kitcuda_initialize();
+
+  if (!__kitcuda_is_mem_managed(dst) || !__kitcuda_is_mem_managed(src)) {
+    // At least one of dst or src is unmanaged, use the host memcpy.
+    memcpy(dst, src, size);
+    return;
+  }
+  __kitcuda_set_context();
+
+  CU_SAFE_CALL(cuMemcpy_p(reinterpret_cast<CUdeviceptr>(dst),
+                          reinterpret_cast<CUdeviceptr>(src), size));
+}
+
+void __kitcuda_memmove(void *dst, void *src, size_t size) {
+  const auto dst_ = reinterpret_cast<uintptr_t>(dst);
+  const auto src_ = reinterpret_cast<uintptr_t>(src);
+  if (dst_ < src_ + size && src_ < dst_ + size) {
+    // Memory regions overlap, use memmove because cuMemCpy doesn't really
+    // handle this well. Page faults are the price we have to pay for such edge
+    // cases (meh).
+    memmove(dst, src, size);
+    return;
+  }
+  // No overlap, use our optimized memcpy implementation
+  __kitcuda_memcpy(dst, src, size);
+}
+
+void __kitcuda_memset(void *dst, uint8_t value, size_t size) {
+  if (size < _kitcuda_memops_threshold) {
+    memset(dst, value, size);
+    return;
+  }
+
+  extern bool _kitcuda_initialized;
+  if (not _kitcuda_initialized)
+    __kitcuda_initialize();
+
+  __kitcuda_set_context();
+
+  if (__kitcuda_is_mem_managed(dst)) {
+    CU_SAFE_CALL(
+        cuMemsetD8_v2(reinterpret_cast<CUdeviceptr>(dst), value, size));
+  } else {
+    memset(dst, value, size);
+  }
 }
 }

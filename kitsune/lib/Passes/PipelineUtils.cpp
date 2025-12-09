@@ -21,6 +21,7 @@
 #include "kitsune/Transforms/EmbPrepare.h"
 #include "kitsune/Transforms/EmbResolveLibDeviceCalls.h"
 #include "kitsune/Transforms/GenerateCtors.h"
+#include "kitsune/Transforms/MemOpsReplacement.h"
 #include "kitsune/Transforms/Prefetching.h"
 #include "kitsune/Transforms/RecomputeKernelProperties.h"
 
@@ -85,6 +86,7 @@ llvm::populateKitPostTapirPasses(PassBuilder &pb, OptimizationLevel optLevel,
     pb.invokeKitsunePostTapirLateEPCallbacks(mpm, optLevel);
 
     mpm.addPass(LowerHyperIntrinsicsPass());
+    mpm.addPass(MemOpsReplacementPass());
     mpm.addPass(RecomputeKernelPropertiesPass());
     mpm.addPass(GenerateCtorsPass());
 
