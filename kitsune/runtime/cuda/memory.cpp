@@ -54,6 +54,8 @@
 #include "memory_map.h"
 #include <mutex>
 
+#include "kitsune/Config/config.h"
+
 static std::mutex _kitcuda_mem_alloc_mutex;
 
 extern "C" {
@@ -85,10 +87,10 @@ __kitcuda_mem_alloc_managed(size_t size) {
   CU_SAFE_CALL(cuMemAdvise_p(devp, size, CU_MEM_ADVISE_SET_PREFERRED_LOCATION,
                              _kitcuda_device));
 #else
-  CU_SAFE_CALL(cuMemAdvise_p(devp, size, CU_MEM_ADVISE_SET_ACCESSED_BY,
-                             _kitcuda_mem_location));
-  CU_SAFE_CALL(cuMemAdvise_p(devp, size, CU_MEM_ADVISE_SET_PREFERRED_LOCATION,
-                             _kitcuda_mem_location));
+  CU_SAFE_CALL(cuMemAdvise(devp, size, CU_MEM_ADVISE_SET_ACCESSED_BY,
+                           _kitcuda_mem_location));
+  CU_SAFE_CALL(cuMemAdvise(devp, size, CU_MEM_ADVISE_SET_PREFERRED_LOCATION,
+                           _kitcuda_mem_location));
 #endif // KITSUNE_CUDA_VERSION_MAJOR
 
   int enable = 1;
@@ -271,9 +273,9 @@ void *__kitcuda_mem_gpu_prefetch(void *vp, void *opaque_stream) {
                                  CU_MEM_ADVISE_SET_PREFERRED_LOCATION,
                                  _kitcuda_device));
 #else
-      CU_SAFE_CALL(cuMemAdvise_p((CUdeviceptr)vp, size,
-                                 CU_MEM_ADVISE_SET_PREFERRED_LOCATION,
-                                 _kitcuda_mem_location));
+      CU_SAFE_CALL(cuMemAdvise((CUdeviceptr)vp, size,
+                               CU_MEM_ADVISE_SET_PREFERRED_LOCATION,
+                               _kitcuda_mem_location));
 #endif // KITSUNE_CUDA_VERSION_MAJOR
 
       // Issue a prefetch request on the provided stream.  If the given
@@ -291,8 +293,8 @@ void *__kitcuda_mem_gpu_prefetch(void *vp, void *opaque_stream) {
       CU_SAFE_CALL(cuMemPrefetchAsync_p((CUdeviceptr)vp, size, _kitcuda_device,
                                         cu_stream));
 #else
-      CU_SAFE_CALL(cuMemPrefetchAsync_p((CUdeviceptr)vp, size, _kitcuda_mem_location, 0,
-                                        cu_stream));
+      CU_SAFE_CALL(cuMemPrefetchAsync((CUdeviceptr)vp, size,
+                                      _kitcuda_mem_location, 0, cu_stream));
 #endif // KITSUNE_CUDA_VERSION_MAJOR
       _kitcuda_mem_alloc_mutex.lock();
       __kitrt_mark_mem_prefetched(vp);
