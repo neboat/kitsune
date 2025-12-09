@@ -129,7 +129,7 @@ void __kitcuda_set_default_threads_per_blk(int threads_per_blk) {
   _KITCUDA_DEFAULT_THREADS_PER_BLK = threads_per_blk;
 }
 
-typedef std::unordered_map<std::string, int> KitCudaLaunchParamMap;
+typedef kitrt::unordered_map<std::string, int> KitCudaLaunchParamMap;
 static KitCudaLaunchParamMap _kitcuda_launch_param_map;
 
 namespace {
@@ -441,6 +441,165 @@ void *__kitcuda_launch_kernel(const void *fat_bin, const char *kernel_name,
                                 cu_stream, kern_args, NULL));
   return (void *)cu_stream;
 }
+
+extern "C" { // Taken from cheetah
+typedef void (*__cilk_identity_fn)(void *);
+typedef void (*__cilk_reduce_fn)(void *, void *);
+
+void *__cilkrts_reducer_lookup(void *key, size_t size, __cilk_identity_fn id,
+                               __cilk_reduce_fn reduce);
+void __cilkrts_reducer_register(void *key, size_t size, __cilk_identity_fn id,
+                                __cilk_reduce_fn reduce);
+void __cilkrts_reducer_unregister(void *key);
+}
+
+struct KitCudaScannerMem {
+  void *aggregate = nullptr;
+  void *inclusive_prefix = nullptr;
+  void *scan_state = nullptr;
+  CUstream stream = nullptr;
+  uint64_t size = 0;
+  int blks_per_grid = 0;
+
+  void init(CUstream _stream, uint64_t _size, int _blks_per_grid) {
+    if (stream != _stream || size != _size || blks_per_grid != _blks_per_grid) {
+      free();
+
+      stream = _stream;
+      size = _size;
+      blks_per_grid = _blks_per_grid;
+
+      CU_SAFE_CALL(cuMemAllocAsync((CUdeviceptr *)&aggregate,
+                                     size * blks_per_grid, stream))
+
+      CU_SAFE_CALL(cuMemAllocAsync((CUdeviceptr *)&inclusive_prefix,
+                                     size * blks_per_grid, stream))
+
+      CU_SAFE_CALL(cuMemAllocAsync((CUdeviceptr *)&scan_state,
+                                     sizeof(int32_t) * blks_per_grid, stream))
+    }
+  }
+
+  void free() {
+    if (aggregate) {
+      CU_SAFE_CALL(cuMemFreeAsync((CUdeviceptr)aggregate, stream));
+      aggregate = nullptr;
+    }
+    if (inclusive_prefix) {
+      CU_SAFE_CALL(cuMemFreeAsync((CUdeviceptr)inclusive_prefix, stream));
+      inclusive_prefix = nullptr;
+    }
+    if (scan_state) {
+      CU_SAFE_CALL(cuMemFreeAsync((CUdeviceptr)scan_state, stream));
+      scan_state = nullptr;
+    }
+    stream = nullptr;
+    size = 0;
+    blks_per_grid = 0;
+  }
+
+  static void identity(void *v) {
+    new (v) KitCudaScannerMem;
+    fprintf(stderr, "KitCudaScannerMem::identity\n");
+  }
+
+  static void reduce(void *l, void *r) {
+    auto *rscanmem = reinterpret_cast<KitCudaScannerMem *>(r);
+    rscanmem->free();
+  }
+};
+
+static KitCudaScannerMem _kitcuda_scanner_mem;
+
+void __kitcuda_alloc_scanner(const void *fat_bin, const char *kernel_name,
+                             uint64_t trip_count, const KitRTInstMix *inst_mix,
+                             uint64_t size, void **aggregate,
+                             void **inclusive_prefix, void **scan_state,
+                             void *opaque_stream) {
+  assert(fat_bin && "kitcuda: alloc scanner with null fat binary!");
+  assert(kernel_name && "kitcuda: alloc scanner with null name!");
+  assert(trip_count != 0 && "kitcuda: alloc scanner with zero trips!");
+
+  KIT_NVTX nvtx_raii("kitcuda:alloc_scanner", KIT_NVTX_LAUNCH);
+
+  __kitcuda_set_context();
+
+  CUfunction cu_func;
+  KitCudaKernelMap::iterator kernit = _kitcuda_kernel_map.find(kernel_name);
+  if (kernit == _kitcuda_kernel_map.end()) {
+    _kitcuda_module_map_mutex.lock();
+    KitCudaKernelMap::iterator kernit = _kitcuda_kernel_map.find(kernel_name);
+    if (kernit == _kitcuda_kernel_map.end()) {
+      // We have not yet encountered this kernel function...  Check to see
+      // if we already have a supporting module for the fat binary.
+      CUmodule cu_module;
+      KitCudaModuleMap::iterator modit = _kitcuda_module_map.find(fat_bin);
+      if (modit == _kitcuda_module_map.end()) {
+        // Create a supporting CUDA module and "register" the fat binary
+        // image in the map...
+        CU_SAFE_CALL(cuModuleLoadData_p(&cu_module, fat_bin));
+        _kitcuda_module_map[fat_bin] = cu_module;
+      } else
+        cu_module = modit->second;
+
+      // Look up the kernel function.
+      CU_SAFE_CALL(cuModuleGetFunction_p(&cu_func, cu_module, kernel_name));
+      _kitcuda_kernel_map[kernel_name] = cu_func;
+    } else {
+      cu_func = kernit->second;
+    }
+    _kitcuda_module_map_mutex.unlock();
+  } else
+    cu_func = kernit->second;
+
+  int blks_per_grid, threads_per_blk;
+  __kitcuda_get_launch_params(trip_count, cu_func, threads_per_blk,
+                              blks_per_grid, inst_mix);
+  // CUstream cu_stream = (CUstream)__kitcuda_get_thread_stream();
+  CUstream cu_stream = nullptr;
+  if (opaque_stream == nullptr) {
+    // create a stream for this launch...
+    cu_stream = (CUstream)__kitcuda_get_thread_stream();
+    KIT_VERBOSE_PRINT("kitcuda: alloc_scanner stream is null, requested a new stream.\n");
+  } else {
+    // use the provided stream for this launch...
+    cu_stream = (CUstream)opaque_stream;
+    KIT_VERBOSE_PRINT("kitcuda: alloc_scanner stream is non-null.\n");
+  }
+  // CU_SAFE_CALL(cuMemAllocAsync_p((CUdeviceptr *)aggregate, size * blks_per_grid,
+  //                                cu_stream))
+  // CU_SAFE_CALL(cuMemAllocAsync_p((CUdeviceptr *)inclusive_prefix,
+  //                                size * blks_per_grid, cu_stream))
+  // CU_SAFE_CALL(cuMemAllocAsync_p((CUdeviceptr *)scan_state,
+  //                                sizeof(int32_t) * blks_per_grid, cu_stream))
+  auto *scanmem =
+      reinterpret_cast<KitCudaScannerMem *>(__hyper_lookup(
+          &_kitcuda_scanner_mem, sizeof(_kitcuda_scanner_mem),
+          KitCudaScannerMem::identity, KitCudaScannerMem::reduce));
+  scanmem->init(cu_stream, size, blks_per_grid);
+  *aggregate = scanmem->aggregate;
+  *inclusive_prefix = scanmem->inclusive_prefix;
+  *scan_state = scanmem->scan_state;
+  CU_SAFE_CALL(cuMemsetD8Async_p((CUdeviceptr)*scan_state, 0,
+                                 sizeof(int32_t) * blks_per_grid, cu_stream))
+}
+
+void __kitcuda_free_scanner(void *aggregate, void *inclusive_prefix,
+                            void *scan_state, void *opaque_stream) {
+  assert(aggregate && "kitcuda: free scanner with null aggregate!");
+  assert(inclusive_prefix &&
+         "kitcuda: free scanner with null inclusive prefix!");
+  assert(scan_state && "kitcuda: free scanner with null scan state!");
+
+  KIT_NVTX nvtx_raii("kitcuda:free_scanner", KIT_NVTX_LAUNCH);
+
+  // CUstream cu_stream = (CUstream)__kitcuda_get_thread_stream();
+  // CU_SAFE_CALL(cuMemFreeAsync_p((CUdeviceptr)aggregate, cu_stream));
+  // CU_SAFE_CALL(cuMemFreeAsync_p((CUdeviceptr)inclusive_prefix, cu_stream));
+  // CU_SAFE_CALL(cuMemFreeAsync_p((CUdeviceptr)scan_state, cu_stream));
+}
+
+void *__kitcuda_null() { return nullptr; }
 
 uint64_t __kitcuda_get_global_symbol(void *fat_bin, const char *sym_name) {
   assert(fat_bin && "null fat binary!");

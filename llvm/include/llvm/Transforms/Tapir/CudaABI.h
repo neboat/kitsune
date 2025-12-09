@@ -165,6 +165,14 @@ private:
   // ReducerOutlineLoopCallInfo.
   DenseMap<const Value *, ReducerOutlineLoopCallInfo> ReducerInputs;
 
+  struct ScannerOutlineLoopCallInfo {
+    size_t Size;
+    Value *Aggregate;
+    Value *InclusivePrefix;
+    Value *ScanState;
+  };
+  SmallVector<ScannerOutlineLoopCallInfo, 1> ScannerInputs;
+
 public:
   /// Create a loop outline processor for the cuda tapir target.
   /// @param M The host module
@@ -177,6 +185,9 @@ public:
   ~CudaLoop();
 
   void fixReducersInKernel(Function *KernelF, Value *ThreadIdx, Value *BlockDim,
+                           ValueToValueMapTy &VMap);
+
+  void fixScannersInKernel(Function *KernelF, Value *TripCount,
                            ValueToValueMapTy &VMap);
 
   void preProcessTapirLoop(TapirLoopInfo &TL, ValueToValueMapTy &VMap) override;

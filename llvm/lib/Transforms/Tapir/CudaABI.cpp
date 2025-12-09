@@ -419,6 +419,108 @@ void CudaLoop::fixReducersInKernel(Function *KernelF, Value *ThreadIdx,
   }
 }
 
+void CudaLoop::fixScannersInKernel(Function *KernelF, Value *TripCount,
+                                   ValueToValueMapTy &VMap) {
+  auto *Int32Ty = Type::getInt32Ty(KernelF->getContext());
+  struct ScannerInfo {
+    size_t Size;
+    Type *Type;
+    CallInst *Call;
+  };
+  SmallVector<ScannerInfo, 8> Scanners;
+  for (inst_iterator I = inst_begin(KernelF), E = inst_end(KernelF); I != E;
+       ++I) {
+    if (auto *Call = dyn_cast<CallInst>(&*I)) {
+      if (Call->getCalledFunction()->getName() != "__kitcuda_get_scan_view")
+        continue;
+      size_t Size = 0;
+      if (auto *ConstSize = dyn_cast<ConstantInt>(Call->getArgOperand(0))) {
+        Size = ConstSize->getZExtValue();
+      }
+      LLVM_DEBUG(dbgs() << "Found size " << Size << ", Call " << *Call
+                        << ", operand 0 " << *Call->getArgOperand(0) << "\n");
+      assert(Size > 0 && Size % sizeof(int32_t) == 0 &&
+             "cuabi: scanner variable has invalid size");
+      size_t NumI32s = Size / sizeof(int32_t);
+      Type *Ty =
+          NumI32s == 1
+              ? static_cast<Type *>(Int32Ty) // Does it improve performance?
+              : ArrayType::get(Int32Ty, NumI32s);
+      Scanners.push_back({Size, Ty, Call});
+    }
+  }
+
+  if (Scanners.empty())
+    return;
+
+  const auto VMapReverseLookup = [&VMap](Value *Target) -> Value * {
+    for (auto [K, V] : VMap) {
+      if (V == Target)
+        return const_cast<Value *>(K);
+    }
+    return nullptr;
+  };
+
+  BasicBlock *Entry = &KernelF->getEntryBlock();
+  BasicBlock *Exit = getUniqueExitBlock(KernelF);
+  const auto FirstAndLastLoc = getFirstAndLastDebugLoc(KernelF);
+  IRBuilder<> EntryBuilder(Entry->getTerminator());
+  IRBuilder<> ExitBuilder(Exit->getTerminator());
+
+  auto *PtrTy = PointerType::get(KernelModule.getContext(), 0);
+  auto *Int64Ty = Type::getInt64Ty(KernelModule.getContext());
+  auto *VoidTy = Type::getVoidTy(KernelModule.getContext());
+  FunctionCallee KitCudaScanFn = KernelModule.getOrInsertFunction(
+      "__kitcuda_scan", /* returns */ VoidTy,
+      /* view */ PtrTy, /* temp_1 */ PtrTy, /* temp_2 */ PtrTy,
+      /* temp_3 */ PtrTy, /* shmem */ PtrTy,
+      /* aggregate */ PtrTy, /* inclusive_prefix */ PtrTy,
+      /* scan_state */ PtrTy, /* size */ Int64Ty,
+      /* result */ PtrTy, /* n */ Int64Ty, /* identity fn */ PtrTy,
+      /* reduce fn */ PtrTy);
+
+  for (ScannerInfo &SI : Scanners) {
+    // Create Allocas
+    Value *View = EntryBuilder.CreateAlloca(SI.Type);
+    Value *Temp1 = EntryBuilder.CreateAlloca(SI.Type);
+    Value *Temp2 = EntryBuilder.CreateAlloca(SI.Type);
+    Value *Temp3 = EntryBuilder.CreateAlloca(SI.Type);
+
+    Value *Aggregate = SI.Call->getArgOperand(1);
+    Value *InclusivePrefix = SI.Call->getArgOperand(2);
+    Value *ScanState = SI.Call->getArgOperand(3);
+    Value *Result = SI.Call->getArgOperand(4);
+    Value *IdFn = SI.Call->getArgOperand(5);
+    Value *ReduceFn = SI.Call->getArgOperand(6);
+
+    ArrayType *ArrayTy =
+        ArrayType::get(Int32Ty, MaxNumWarps * (SI.Size / sizeof(int32_t)));
+    std::string ArrayName = KernelF->getName().str() + ".blk_scan_array." +
+                            SI.Call->getArgOperand(0)->getName().str();
+    GlobalVariable *Array = new GlobalVariable(
+        KernelModule, ArrayTy, false, GlobalValue::InternalLinkage,
+        UndefValue::get(ArrayTy), ArrayName, nullptr,
+        GlobalVariable::NotThreadLocal, 3);
+    Value *Shmem = ExitBuilder.CreateAddrSpaceCast(Array, PtrTy);
+    CallInst *ScanCall = ExitBuilder.CreateCall(
+        KitCudaScanFn,
+        {View, Temp1, Temp2, Temp3, Shmem, Aggregate, InclusivePrefix,
+         ScanState, ConstantInt::get(Int64Ty, SI.Size), Result, TripCount, IdFn,
+         ReduceFn});
+    ScanCall->setDebugLoc(FirstAndLastLoc.second);
+    CallInst *IdCall =
+        EntryBuilder.CreateCall(dyn_cast<Function>(IdFn), {View});
+    IdCall->setDebugLoc(FirstAndLastLoc.first);
+
+    SI.Call->replaceAllUsesWith(View);
+    SI.Call->eraseFromParent();
+
+    ScannerInputs.push_back({SI.Size, VMapReverseLookup(Aggregate),
+                             VMapReverseLookup(InclusivePrefix),
+                             VMapReverseLookup(ScanState)});
+  }
+}
+
 void CudaLoop::preProcessTapirLoop(TapirLoopInfo &TL,
                                    ValueToValueMapTy &FVMap) {
   LLVM_DEBUG(dbgs() << "debug[cuabi]: -preprocessing loop for kernel '"
@@ -592,6 +694,7 @@ void CudaLoop::postProcessOutline(TapirLoopInfo &TLI, TaskOutlineInfo &Out,
   ClonedCond->setOperand(TripCountIdx, ThreadEnd);
 
   fixReducersInKernel(KernelF, ThreadIdx, BlockDim, VMap);
+  fixScannersInKernel(KernelF, End, VMap);
 }
 }
 
@@ -661,6 +764,14 @@ void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
     ReducerInputsHost.push_back({Inp, HostLookup});
   }
 
+  // Replace scanner inputs with calls to Kitsune hyperobject intrinsics.
+  for (ScannerOutlineLoopCallInfo &SOI : ScannerInputs) {
+    Builder.CreateIntrinsic(
+        VoidTy, Intrinsic::kit_scanner_setup,
+        {EmbFB, KName, TripCount, KProps, ConstantInt::get(Int64Ty, SOI.Size),
+         SOI.Aggregate, SOI.InclusivePrefix, SOI.ScanState, CudaStream});
+  }
+
   for (Value *Inp : CallOutlined->args())
     Args.push_back(Inp);
 
@@ -681,6 +792,13 @@ void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
                             {HostLookup, Reducer,
                              ConstantInt::get(Int64Ty, Info.Size), Info.IdFn,
                              Info.MergeFn, CudaStream});
+  }
+
+  // Synchronize any scanners used in the kernel.
+  for (ScannerOutlineLoopCallInfo &SOI : ScannerInputs) {
+    Builder.CreateIntrinsic(
+        VoidTy, Intrinsic::kit_scanner_sync,
+        {SOI.Aggregate, SOI.InclusivePrefix, SOI.ScanState, CudaStream});
   }
 
   // After the kernel is done, copy the non-const globals back to the host. This
