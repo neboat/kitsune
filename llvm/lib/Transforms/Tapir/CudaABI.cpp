@@ -278,7 +278,13 @@ void CudaLoop::postProcessOutline(TapirLoopInfo &TLI, TaskOutlineInfo &Out,
 
   // Set the generated name for the kernel. This name is passed to the runtime's
   // kernel launch function, so it must be set correctly.
+  LLVM_DEBUG(dbgs() << "Renaming KernelF " << KernelF->getName() << " to "
+                    << KernelName << "\n");
   KernelF->setName(KernelName);
+  LLVM_DEBUG(dbgs() << "  new name: " << KernelF->getName() << "\n");
+  // If KernelName was already in use, then KernelF may have a different name
+  // than KernelName.  Get the actual name of KernelF.
+  KernelName = KernelF->getName();
 
   // Set the linkage of the kernel to external to prevent it from being DCE'ed
   // since there will be no caller for the function in the kernel module.
