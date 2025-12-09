@@ -166,8 +166,6 @@ private:
     cgfbOpts.ptxasOptLevel = tto.getOptznLevel();
     if (clPtxasOptLevel.getNumOccurrences())
       cgfbOpts.ptxasOptLevel = clPtxasOptLevel;
-    else if (m.getNamedMetadata("llvm.dbg.cu"))
-      cgfbOpts.ptxasOptLevel = OptznLevel::O0;
 
     cgfbOpts.keepFiles = clKeepFiles;
     cgfbOpts.debugCommandLines = clDebugCommandLines;

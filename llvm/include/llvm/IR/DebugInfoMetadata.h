@@ -2106,6 +2106,7 @@ public:
   DebugEmissionKind getEmissionKind() const {
     return (DebugEmissionKind)EmissionKind;
   }
+  void setEmissionKind(DebugEmissionKind EK) { EmissionKind = (unsigned)EK; }
   bool isDebugDirectivesOnly() const {
     return EmissionKind == DebugDirectivesOnly;
   }

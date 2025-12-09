@@ -14,6 +14,7 @@
 #include "CGFBImpl.h"
 #include "kitsune/Config/config.h"
 #include "kitsune/Core/EmbUtils.h"
+#include "kitsune/Core/OptznLevel.h"
 #include "kitsune/Core/TTOptions.h"
 #include "kitsune/Core/TargetUtils.h"
 #include "kitsune/Support/OptznLevelUtils.h"
@@ -21,6 +22,7 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/CommandLine.h"
@@ -70,6 +72,24 @@ private:
       dump(tm->Options, errs());
     if (cgfbOpts.debugMCTargetOptions)
       dump(tm->Options.MCOptions, errs());
+
+    if (cgfbOpts.ptxasOptLevel != OptznLevel::O0) {
+      // DICompileUnit::DebugDirectivesOnly supports optimized debugging and
+      // it's good enough (you get to see the source code from Nsight reports).
+      // So we downgrade the EmissionKind of debug compile units in the kernel
+      // module.
+      for (DICompileUnit *CU : km.debug_compile_units()) {
+        switch (CU->getEmissionKind()) {
+        case DICompileUnit::NoDebug:
+        case DICompileUnit::DebugDirectivesOnly:
+          break;
+        case DICompileUnit::LineTablesOnly:
+        case DICompileUnit::FullDebug:
+          CU->setEmissionKind(DICompileUnit::DebugDirectivesOnly);
+          break;
+        }
+      }
+    }
 
     // Setup the passes and request that the output goes to the specified PTX
     // file.
