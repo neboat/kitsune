@@ -194,8 +194,15 @@ void __kitcuda_mem_free(void *[[kitsune::mobile]] vp) {
   // here -- a non-v2 version will actually result in
   // crashes...
   _kitcuda_mem_alloc_mutex.lock();
+  bool ro, wo;
+  if (__kitrt_get_mem_alloc_size((void *)vp, &ro, &wo) == 0) {
+    _kitcuda_mem_alloc_mutex.unlock();
+    free((void *)vp);
+    return;
+  }
   __kitrt_unregister_mem_alloc(vp);
   _kitcuda_mem_alloc_mutex.unlock();
+  KIT_VERBOSE_PRINT("__kitcuda_mem_free: vp %p\n", vp);
   CU_SAFE_CALL(cuMemFree_v2_p((CUdeviceptr)vp));
 }
 
