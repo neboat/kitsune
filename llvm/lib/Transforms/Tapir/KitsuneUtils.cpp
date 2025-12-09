@@ -261,9 +261,10 @@ std::string llvm::getNameForTapirLoop(const TapirLoopInfo &tl, StringRef pfx,
     DebugLoc loc = loop->getStartLoc();
     unsigned line = loc.getLine();
     unsigned col = loc.getCol();
+    StringRef name = loc->getScope()->getSubprogram()->getName();
     StringRef filePath = loc->getFile()->getFilename();
     StringRef fileName = sys::path::filename(filePath);
-    os << fileName << "_" << line << "_" << col;
+    os << name << "_" << fileName << "_" << line << "_" << col;
   } else {
     StringRef name = f->getName();
     std::string demangledName;
