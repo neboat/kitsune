@@ -192,14 +192,14 @@ private:
     return getOrInsertLibFunc(m, funcs.at(id));
   }
 
-  FunctionCallee getMemAllocFunc(Module &m, Intrinsic::ID id) {
+  FunctionCallee getMobileMemFunc(Module &m, Intrinsic::ID id, LibFunc SerialLibFunc) {
     /// TODO: Currently, this is very naive and simply looks at the primary
     /// target. This will not work correctly in multi-target mode. But that
     /// requires a more sophisticated analysis which should be implemented
     /// eventually.
     std::optional<TTID> tt = tgi.getTTIDOrNull();
     if (not tt)
-      return getOrInsertLibFunc(m, LibFunc_malloc);
+      return getOrInsertLibFunc(m, SerialLibFunc);
 
     switch (*tt) {
     case TTID::Cuda:
@@ -216,7 +216,7 @@ private:
     case TTID::OpenCilk:
     case TTID::Pthreads:
     case TTID::Serial:
-      return getOrInsertLibFunc(m, LibFunc_malloc);
+      return getOrInsertLibFunc(m, SerialLibFunc);
     case TTID::Lambda:
     case TTID::OMPTask:
     case TTID::OpenMP:
@@ -230,44 +230,6 @@ private:
     llvm_unreachable("getMemAllocFunc: TTID not handled");
   }
 
-  FunctionCallee getMemFreeFunc(Module &m, Intrinsic::ID id) {
-    /// TODO: Currently, this is very naive and simply looks at the primary
-    /// target. This will not work correctly in multi-target mode. But that
-    /// requires a more sophisticated analysis which should be implemented
-    /// eventually.
-    std::optional<TTID> tt = tgi.getTTIDOrNull();
-    if (not tt)
-      return getOrInsertLibFunc(m, LibFunc_free);
-
-    switch (*tt) {
-    case TTID::Cuda:
-      return getOrInsertLibFunc(m, TTID::Cuda, id);
-    case TTID::Hip:
-      return getOrInsertLibFunc(m, TTID::Hip, id);
-    case TTID::Custom:
-      // TODO: A custom tapir target may require a custom memory deallocator.
-      // Currently, there is no way to have the plugin specify a memory
-      // deallocator to use, so just default to using libc's free.
-    case TTID::Nolo:
-      // When using the 'nolo' tapir target, we should never get here, but in
-      // case we do, just default to using libc's free.
-    case TTID::OpenCilk:
-    case TTID::Pthreads:
-    case TTID::Serial:
-      return getOrInsertLibFunc(m, LibFunc_free);
-    case TTID::Lambda:
-    case TTID::OMPTask:
-    case TTID::OpenMP:
-    case TTID::Qthreads:
-    case TTID::Realm:
-      // These tapir targets are not fully supported yet, but add them to this
-      // switch to ensure that a warning is emitted when a new tapir target is
-      // added.
-      break;
-    }
-    llvm_unreachable("getMemFreeFunc: TTID not handled");
-  }
-
   /// Get the kitsune runtime function that will replace the intrinsic called in
   /// the given call instruction.
   FunctionCallee getRuntimeFunc(CallInst &call) {
@@ -276,10 +238,10 @@ private:
 
     switch (id) {
     case Intrinsic::kit_mobile_alloc:
-      return getMemAllocFunc(m, id);
+      return getMobileMemFunc(m, id, LibFunc_malloc);
 
     case Intrinsic::kit_mobile_free:
-      return getMemFreeFunc(m, id);
+      return getMobileMemFunc(m, id, LibFunc_free);
 
     case Intrinsic::kit_enable_verbose:
       // Intrinsics with runtime functions that are independent of a tapir
