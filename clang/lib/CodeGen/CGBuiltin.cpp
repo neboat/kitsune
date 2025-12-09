@@ -6341,6 +6341,32 @@ RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
     llvm::Type *DestTy = llvm::PointerType::get(Ctxt, KitAS::Mobile);
     return RValue::get(Builder.CreateAddrSpaceCast(Ptr, DestTy));
   }
+
+  case Builtin::BI__hyper_lookup: {
+    llvm::Value *Size = EmitScalarExpr(E->getArg(1));
+    Function *F = CGM.getIntrinsic(Intrinsic::hyper_lookup, Size->getType());
+    llvm::Value *Ptr = EmitScalarExpr(E->getArg(0));
+    llvm::Value *Identity = EmitScalarExpr(E->getArg(2));
+    llvm::Value *Reduce = EmitScalarExpr(E->getArg(3));
+    return RValue::get(Builder.CreateCall(
+        F, {Ptr, Size, Builder.CreateBitCast(Identity, VoidPtrTy),
+            Builder.CreateBitCast(Reduce, VoidPtrTy)}));
+  }
+  case Builtin::BI__hyper_register: {
+    llvm::Value *Size = EmitScalarExpr(E->getArg(1));
+    Function *F = CGM.getIntrinsic(Intrinsic::reducer_register, Size->getType());
+    llvm::Value *Ptr = EmitScalarExpr(E->getArg(0));
+    llvm::Value *Identity = EmitScalarExpr(E->getArg(2));
+    llvm::Value *Reduce = EmitScalarExpr(E->getArg(3));
+    return RValue::get(Builder.CreateCall(
+        F, {Ptr, Size, Builder.CreateBitCast(Identity, VoidPtrTy),
+            Builder.CreateBitCast(Reduce, VoidPtrTy)}));
+  }
+  case Builtin::BI__hyper_deregister: {
+    Function *F = CGM.getIntrinsic(Intrinsic::reducer_unregister);
+    llvm::Value *Ptr = EmitScalarExpr(E->getArg(0));
+    return RValue::get(Builder.CreateCall(F, {Ptr}));
+  }
   }
 
   // If this is an alias for a lib function (e.g. __builtin_sin), emit

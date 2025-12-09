@@ -418,7 +418,9 @@ static bool compareFnAttributes(const CodeGenIntrinsic *L,
     return std::tie(I->canThrow, I->isNoDuplicate, I->isNoMerge, I->isNoReturn,
                     I->isNoCallback, I->isNoSync, I->isNoFree, I->isWillReturn,
                     I->isCold, I->isConvergent, I->isSpeculatable,
-                    I->hasSideEffects, I->isStrictFP);
+                    I->hasSideEffects, I->isStrictFP, I->isInjective,
+                    I->isStrandPure, I->isReducerRegister,
+                    I->isReducerUnregister, I->isHyperView);
   };
 
   auto TieL = TieBoolAttributes(L);
@@ -443,7 +445,9 @@ static bool hasFnAttributes(const CodeGenIntrinsic &Int) {
   return !Int.canThrow || Int.isNoReturn || Int.isNoCallback || Int.isNoSync ||
          Int.isNoFree || Int.isWillReturn || Int.isCold || Int.isNoDuplicate ||
          Int.isNoMerge || Int.isConvergent || Int.isSpeculatable ||
-         Int.isStrictFP || getEffectiveME(Int) != MemoryEffects::unknown();
+         Int.isStrictFP || Int.isInjective || Int.isStrandPure ||
+         Int.isReducerRegister || Int.isReducerUnregister || Int.isHyperView ||
+         getEffectiveME(Int) != MemoryEffects::unknown();
 }
 
 namespace {
@@ -605,6 +609,16 @@ static AttributeSet getIntrinsicFnAttributeSet(LLVMContext &C, unsigned ID) {
       addAttribute("Speculatable");
     if (Int.isStrictFP)
       addAttribute("StrictFP");
+    if (Int.isInjective)
+      addAttribute("Injective");
+    if (Int.isStrandPure)
+      addAttribute("StrandPure");
+    if (Int.isReducerRegister)
+      addAttribute("ReducerRegister");
+    if (Int.isReducerUnregister)
+      addAttribute("ReducerUnregister");
+    if (Int.isHyperView)
+      addAttribute("HyperView");
 
     const MemoryEffects ME = getEffectiveME(Int);
     if (ME != MemoryEffects::unknown()) {

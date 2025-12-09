@@ -344,6 +344,10 @@ instructionClobbersQuery(const MemoryDef *MD, const MemoryLocation &UseLoc,
 
   if (auto *CB = dyn_cast_or_null<CallBase>(UseInst)) {
     bool SameSpindle = false;
+    if (TI && CB->isStrandPure() &&
+        (TI->getSpindleFor(CB->getParent()) ==
+         TI->getSpindleFor(DefInst->getParent())))
+      SameSpindle = true;
     ModRefInfo I = AA.getModRefInfo(DefInst, CB, SameSpindle);
     return isModOrRefSet(I);
   }

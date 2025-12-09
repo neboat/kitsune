@@ -117,6 +117,15 @@ struct CodeGenIntrinsic {
   // True if the intrinsic is marked as strictfp.
   bool isStrictFP = false;
 
+  // True if this is an injective function.
+  bool isInjective = false;
+
+  // Tapir reducer-related attributes
+  bool isStrandPure = false;
+  bool isHyperView = false;
+  bool isReducerRegister = false;
+  bool isReducerUnregister = false;
+
   enum ArgAttrKind {
     NoCapture,
     NoAlias,

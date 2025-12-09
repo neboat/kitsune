@@ -404,6 +404,16 @@ void CodeGenIntrinsic::setProperty(const Record *R) {
     hasSideEffects = true;
   else if (R->getName() == "IntrStrictFP")
     isStrictFP = true;
+  else if (R->getName() == "IntrInjective")
+    isInjective = true;
+  else if (R->getName() == "IntrStrandPure")
+    isStrandPure = true;
+  else if (R->getName() == "IntrReducerRegister")
+    isReducerRegister = true;
+  else if (R->getName() == "IntrHyperView")
+    isHyperView = true;
+  else if (R->getName() == "IntrReducerUnregister")
+    isReducerUnregister = true;
   else if (R->isSubClassOf("NoCapture")) {
     unsigned ArgNo = R->getValueAsInt("ArgNo");
     addArgAttribute(ArgNo, NoCapture);

@@ -1762,6 +1762,18 @@ static bool isSafeToExecuteUnconditionally(
       isSafeToSpeculativelyExecute(&Inst, CtxI, AC, DT, TLI))
     return true;
 
+  if (CtxI) {
+    // Check for a call to a strand-pure function.  Such a call is safe to
+    // execute unconditionally if CtxI and Inst belong to the same spindle.
+    if (const CallBase *CB = dyn_cast<CallBase>(&Inst)) {
+      const Function *Callee = CB->getCalledFunction();
+      if (Callee && Callee->isStrandPure())
+        if (TI->getSpindleFor(Inst.getParent()) !=
+            TI->getSpindleFor(CtxI->getParent()))
+          return false;
+    }
+  }
+
   bool GuaranteedToExecute =
       SafetyInfo->isGuaranteedToExecute(Inst, DT, TI, CurLoop);
 

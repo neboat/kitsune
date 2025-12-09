@@ -295,10 +295,7 @@ ModRefInfo AAResults::getModRefInfo(const Instruction *I, const CallBase *Call2,
 }
 
 static bool effectivelyArgMemOnly(const CallBase *Call, AAQueryInfo &AAQI) {
-  // The code in upstream Tapir uses call->isStrandPure() which we have removed
-  // since we don't need it anywhere else. We can therefore assume that it is
-  // false.
-  return false;
+  return Call->isStrandPure() && AAQI.AssumeSameSpindle;
 }
 
 ModRefInfo AAResults::getModRefInfo(const CallBase *Call,
