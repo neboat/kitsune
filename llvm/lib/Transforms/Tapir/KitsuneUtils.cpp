@@ -185,18 +185,14 @@ void llvm::cloneReachableFuncsInto(
   // mappings for the global variables that may be needed.
   for (GlobalValue *g : usedGlobalValues) {
     if (auto *f = dyn_cast<Function>(g)) {
-      StringRef fname = f->getName();
-      Function *devf = devM.getFunction(fname);
-      if (not devf) {
-        FunctionType *fty = f->getFunctionType();
-        GlobalValue::LinkageTypes linkage = f->getLinkage();
-        devf = Function::Create(fty, linkage, fname, devM);
-        for (unsigned i = 0; i < f->arg_size(); ++i) {
-          Argument *a = f->getArg(i);
-          Argument *deva = devf->getArg(i);
-          deva->setName(a->getName());
-          vmap[a] = deva;
-        }
+      std::string fname(f->getName());
+      Function *devf = cast<Function>(
+          devM.getOrInsertFunction(fname, f->getFunctionType()).getCallee());
+      for (unsigned i = 0; i < f->arg_size(); ++i) {
+        Argument *a = f->getArg(i);
+        Argument *deva = devf->getArg(i);
+        deva->setName(a->getName());
+        vmap[a] = deva;
       }
       vmap[f] = devf;
     }
@@ -210,9 +206,11 @@ void llvm::cloneReachableFuncsInto(
       if (f->size() and not f->isIntrinsic()) {
         SmallVector<ReturnInst *, 8> returns;
         auto *devf = cast<Function>(vmap[f]);
-        CloneFunctionInto(devf, f, vmap,
-                          CloneFunctionChangeType::DifferentModule, returns);
-        devf->addFnAttr(Attribute::KitDevice);
+        if (devf->size() == 0) {
+          CloneFunctionInto(devf, f, vmap,
+                            CloneFunctionChangeType::DifferentModule, returns);
+          devf->addFnAttr(Attribute::KitDevice);
+        }
       }
     }
   }
