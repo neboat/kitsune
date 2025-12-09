@@ -427,4 +427,8 @@ void __kithip_memcpy_sym_to_host(void *devPtr, void *hostPtr, size_t size) {
   HIP_SAFE_CALL(hipMemcpyDtoH(hostPtr, devPtr, size));
 }
 
+void __kithip_managed_memcpy(void *dst, const void *src, size_t size) {
+  CU_SAFE_CALL(hipMemcpy_p(reinterpret_cast<CUdeviceptr>(dst),
+                           reinterpret_cast<CUdeviceptr>(src), size));
+}
 } // extern "C"

@@ -18,11 +18,14 @@
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
+#include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/Transforms/Utils/BuildLibCalls.h"
+#include "llvm/Transforms/Utils/TapirUtils.h"
 
 #include <map>
 #include <vector>
@@ -60,6 +63,7 @@ static const KitsuneRuntimeFuncMap kitCudaFuncs = {
     {Intrinsic::kit_mobile_alloc, LibFunc_kitcuda_managed_malloc},
     {Intrinsic::kit_mobile_free, LibFunc_kitcuda_managed_free},
     {Intrinsic::kit_mobile_realloc, LibFunc_kitcuda_managed_realloc},
+    {Intrinsic::kit_mobile_memcpy, LibFunc_kitcuda_managed_memcpy},
     {Intrinsic::kit_set_fixed_tpb, LibFunc_kitcuda_set_fixed_tpb},
     {Intrinsic::kit_set_max_tpb, LibFunc_kitcuda_set_max_tpb},
     {Intrinsic::kit_symbol_device_ptr, LibFunc_kitcuda_symbol_device_ptr},
@@ -82,6 +86,7 @@ static const KitsuneRuntimeFuncMap kitHipFuncs = {
     {Intrinsic::kit_mobile_alloc, LibFunc_kithip_managed_malloc},
     {Intrinsic::kit_mobile_free, LibFunc_kithip_managed_free},
     {Intrinsic::kit_mobile_realloc, LibFunc_kithip_managed_realloc},
+    {Intrinsic::kit_mobile_memcpy, LibFunc_kithip_managed_memcpy},
     {Intrinsic::kit_set_fixed_tpb, LibFunc_kithip_set_fixed_tpb},
     {Intrinsic::kit_set_max_tpb, LibFunc_kithip_set_max_tpb},
     {Intrinsic::kit_symbol_device_ptr, LibFunc_kithip_symbol_device_ptr},
@@ -141,6 +146,7 @@ static const std::map<Intrinsic::ID, std::vector<unsigned>> kitRTArgMap = {
     {Intrinsic::kit_enable_y_axis_launches, {}},
     {Intrinsic::kit_finalize, {}},
     {Intrinsic::kit_initialize, {}},
+    {Intrinsic::kit_mobile_memcpy, {1, 2, 3}},
     {Intrinsic::kit_memcpy_dtoh, {1, 2, 3}},
     {Intrinsic::kit_memcpy_htod, {1, 2, 3}},
     {Intrinsic::kit_set_fixed_tpb, {1}},
@@ -247,6 +253,9 @@ private:
 
     case Intrinsic::kit_mobile_realloc:
       return getMobileMemFunc(m, id, LibFunc_realloc);
+
+    case Intrinsic::kit_mobile_memcpy:
+      return getMobileMemFunc(m, id, LibFunc_memcpy);
 
     case Intrinsic::kit_enable_verbose:
       // Intrinsics with runtime functions that are independent of a tapir
@@ -418,6 +427,32 @@ private:
     return true;
   }
 
+  /// Depending on the tapir target to be used, this may not replace the call.
+  /// In that case, return false. Otherwise, return true.
+  bool lowerMobileMemFunc(CallInst &call) {
+    FunctionCallee f = getRuntimeFunc(call);
+    if (not f.getCallee())
+      return false;
+
+    std::vector<Value *> args;
+    for (Use &arg : call.args()) {
+      if (arg->getType()->isPointerTy()) {
+        args.push_back(arg->stripPointerCasts());
+        continue;
+      }
+      args.push_back(arg.get());
+    }
+
+    // We assume the result of the mem function does not need casting.
+    CallInst *newCall = createNewCallFor(call, f, args);
+    newCall->setAttributes(createNewAttrList(call, {0}));
+
+    call.replaceAllUsesWith(newCall);
+    call.eraseFromParent();
+
+    return true;
+  }
+
   /// Lower the kernel launch intrinsic. This is a vararg intrinsic, but the
   /// corresponding runtime functions need the arguments to be passed an array
   /// of pointers to the arguments. We implement this by creating a stack slot
@@ -519,6 +554,10 @@ private:
 
     case Intrinsic::kit_mobile_realloc:
       changed |= lowerMobileRealloc(call);
+      break;
+
+    case Intrinsic::kit_mobile_memcpy:
+      changed |= lowerMobileMemFunc(call);
       break;
 
     case Intrinsic::kit_async_launch_kernel:

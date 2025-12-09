@@ -148,6 +148,17 @@ def int_kit_mobile_realloc
                 [IntrInaccessibleMemOrArgMemOnly, NoCapture<ArgIndex<0>>,
                  ReadNone<ArgIndex<0>>, NoAlias<RetIndex>]>;
 
+// Copy bytes from mobile buffer to the host. This is a blocking call.
+def int_kit_mobile_memcpy
+    : Intrinsic<[],
+                [llvm_ptr_ty,  // pointer to host memory (destination)
+                 llvm_mobile_ptr_ty,  // pointer to device memory (source)
+                 llvm_i64_ty], // number of bytes to copy
+                [IntrArgMemOnly, IntrWillReturn, IntrNoFree,
+                 NoCapture<ArgIndex<0>>, NoCapture<ArgIndex<1>>,
+                 NoAlias<ArgIndex<0>>, NoAlias<ArgIndex<1>>,
+                 WriteOnly<ArgIndex<0>>, ReadOnly<ArgIndex<1>>]>;
+
 // Enable launch refinement. Setting this will cause the runtime to calculate
 // a kernel's launch parameters based on some heuristic. In the case of NVIDIA
 // GPU's, this is an occupancy-based heuristic provided by cuda's API.

@@ -1560,6 +1560,11 @@ FunctionCallee llvm::getOrInsertLibFunc(Module *M, const TargetLibraryInfo &TLI,
     setArgExtAttr(*F, 1, TLI);
     break;
 
+  case LibFunc_kitcuda_managed_memcpy:
+  case LibFunc_kithip_managed_memcpy:
+    setArgExtAttr(*F, 2, TLI);
+    break;
+
   case LibFunc_kitcuda_symbol_memcpy_dtoh:
   case LibFunc_kitcuda_symbol_memcpy_htod:
   case LibFunc_kithip_symbol_memcpy_dtoh:

@@ -403,4 +403,9 @@ void __kitcuda_memcpy_sym_to_host(uint64_t devPtr, void *hostPtr,
   KIT_NVTX nvtx_raii("kitcuda:memcpy_sym_to_host", KIT_NVTX_MEM);
   CU_SAFE_CALL(cuMemcpyDtoH(hostPtr, devPtr, size));
 }
+
+void __kitcuda_managed_memcpy(void *dst, const void *src, size_t size) {
+  CU_SAFE_CALL(cuMemcpy_p(reinterpret_cast<CUdeviceptr>(dst),
+                          reinterpret_cast<CUdeviceptr>(src), size));
+}
 }

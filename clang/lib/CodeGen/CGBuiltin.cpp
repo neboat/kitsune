@@ -6342,6 +6342,17 @@ RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
     return RValue::get(Builder.CreateAddrSpaceCast(Ptr, DestTy));
   }
 
+  case Builtin::BIkitsune_mobile_memcpy: {
+    Function *F = CGM.getIntrinsic(Intrinsic::kit_mobile_memcpy);
+    llvm::FunctionType *FTy = F->getFunctionType();
+    Value *Dst = EmitScalarExpr(E->getArg(0));
+    Value *Src = EmitScalarExpr(E->getArg(1));
+    Value *Size = EmitScalarExpr(E->getArg(2));
+    if (Size->getType() != FTy->getParamType(2))
+      Size = Builder.CreateTruncOrBitCast(Size, FTy->getParamType(2));
+    return RValue::get(Builder.CreateCall(F, {Dst, Src, Size}));
+  }
+
   case Builtin::BI__hyper_lookup: {
     llvm::Value *Size = EmitScalarExpr(E->getArg(1));
     Function *F = CGM.getIntrinsic(Intrinsic::hyper_lookup, Size->getType());

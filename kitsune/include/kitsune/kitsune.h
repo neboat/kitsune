@@ -37,6 +37,7 @@
 
 #include <stddef.h>
 #include <stdlib.h>
+#include <string.h>
 
 // The definitions allow code containing kitsune builtins and library functions
 // to be compiled with another compiler and maintain "reasonable" behavior.
@@ -58,6 +59,11 @@ kitsune_mobile_alloc(size_t bytes) {
 /// a call to an appropriate runtime function. This is here if the code is not
 /// compiled with Kitsune and simply calls the system's default deallocator.
 EXTERN_C inline void kitsune_mobile_free(void *ptr) { return free(ptr); }
+
+EXTERN_C inline __attribute__((always_inline)) void
+kitsune_mobile_memcpy(void *dst, const void *src, size_t size) {
+  memcpy(dst, src, size);
+}
 
 #endif // __kitsune__
 
