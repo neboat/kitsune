@@ -190,6 +190,7 @@ MODULE_PASS("kit-cgfb", CodeGenFatBinariesPass())
 MODULE_PASS("kit-ctors", GenerateCtorsPass())
 MODULE_PASS("kit-kernel-properties", RecomputeKernelPropertiesPass())
 MODULE_PASS("kit-prefetch", PrefetchingPass())
+MODULE_PASS("kit-lower-hyper", LowerHyperIntrinsicsPass())
 MODULE_PASS("kit-lower-intrinsics", LowerKitsuneIntrinsicsPass())
 MODULE_PASS("kit-strip-addr-spaces", StripKitsuneAddrSpacesPass())
 

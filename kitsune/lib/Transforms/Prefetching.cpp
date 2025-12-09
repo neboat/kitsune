@@ -55,6 +55,11 @@ private:
     Module *m = call.getModule();
     Value *stream = getStreamFromLaunch(call);
     for (Value *arg : getKernelArgumentsFromLaunch(call)) {
+      // Don't prefetch hyper-intrinsic arguments.
+      if (CallInst *argCall = dyn_cast<CallInst>(arg))
+        if (isHyperIntrinsic(argCall->getIntrinsicID()))
+          continue;
+
       if (auto *pty = dyn_cast<PointerType>(arg->getType())) {
 
         // These should be required to be pointers in Kitsune's mobile address

@@ -17,6 +17,7 @@
 #include "llvm/Passes/PassBuilder.h"
 #include "kitsune/Analysis/TapirTargetAnalysis.h"
 #include "kitsune/CodeGen/CodeGenFatBinaries.h"
+#include "kitsune/CodeGen/LowerHyperIntrinsics.h"
 #include "kitsune/CodeGen/LowerKitsuneIntrinsics.h"
 #include "kitsune/CodeGen/StripKitsuneAddrSpaces.h"
 #include "kitsune/Passes/PipelineUtils.h"

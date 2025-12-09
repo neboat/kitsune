@@ -2,6 +2,7 @@ add_llvm_component_library(LLVMKitCodeGen
   CGFBCuda.cpp
   CGFBHip.cpp
   CodeGenFatBinaries.cpp
+  LowerHyperIntrinsics.cpp
   LowerKitsuneIntrinsics.cpp
   StripKitsuneAddrSpaces.cpp
 

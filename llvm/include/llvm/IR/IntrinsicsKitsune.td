@@ -301,3 +301,47 @@ def int_kit_thread_stream
                 [llvm_i32_ty], // tapir target id
                 [ImmArg<ArgIndex<0>>, IntrInaccessibleMemOrArgMemOnly,
                  IntrHasSideEffects]>;
+
+def int_kit_reducer_setup
+    : Intrinsic<[llvm_ptr_ty],
+                [llvm_ptr_ty,    // reducer (leftmost view)
+                 llvm_anyint_ty, // size
+                 llvm_ptr_ty,    // identity fn
+                 llvm_ptr_ty,    // merge fn
+                 llvm_ptr_ty],   // stream
+                [IntrInaccessibleMemOrArgMemOnly,
+                 IntrHasSideEffects]>;
+
+def int_kit_reducer_sync
+    : Intrinsic<[],
+                [llvm_ptr_ty,    // view from device
+                 llvm_ptr_ty,    // reducer (leftmost view)
+                 llvm_anyint_ty, // size
+                 llvm_ptr_ty,    // identity fn
+                 llvm_ptr_ty,    // merge fn
+                 llvm_ptr_ty],   // stream
+                [IntrInaccessibleMemOrArgMemOnly,
+                 IntrHasSideEffects]>;
+
+def int_kit_scanner_setup
+    : Intrinsic<[],
+                [llvm_ptr_ty,  // fat binary
+                 llvm_ptr_ty,  // name
+                 llvm_i64_ty,  // trip_count
+                 llvm_ptr_ty,  // instruction mix info
+                 llvm_i64_ty,  // size
+                 llvm_ptr_ty,  // aggregate
+                 llvm_ptr_ty,  // inclusive prefix
+                 llvm_ptr_ty,  // scan state
+                 llvm_ptr_ty], // stream
+                [IntrInaccessibleMemOrArgMemOnly,
+                 IntrHasSideEffects]>;
+
+def int_kit_scanner_sync
+    : Intrinsic<[],
+                [llvm_ptr_ty,  // aggregate
+                 llvm_ptr_ty,  // inclusive prefix
+                 llvm_ptr_ty,  // scan state
+                 llvm_ptr_ty], // stream
+                [IntrInaccessibleMemOrArgMemOnly,
+                 IntrHasSideEffects]>;

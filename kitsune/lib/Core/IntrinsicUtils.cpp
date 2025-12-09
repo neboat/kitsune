@@ -29,6 +29,10 @@ bool llvm::isKitsuneIntrinsicBlocking(Intrinsic::ID id) {
   return not isKitsuneIntrinsicAsync(id);
 }
 
+bool llvm::isHyperIntrinsic(Intrinsic::ID id) {
+  return Intrinsic::getBaseName(id).starts_with("llvm.kit.reducer");
+}
+
 Value *llvm::getStreamFromLaunch(const CallBase &call) {
   assert(call.getIntrinsicID() == Intrinsic::kit_async_launch_kernel &&
          "Instruction must call async_launch_kernel intrinsic");

@@ -36,6 +36,9 @@ bool isKitsuneIntrinsicAsync(Intrinsic::ID id);
 /// to call this function with an intrinsic that is not a Kitsune intrinsic.
 bool isKitsuneIntrinsicBlocking(Intrinsic::ID id);
 
+/// Check if the intrinsic is a Kitsune hyperobject intrinsic.
+bool isHyperIntrinsic(Intrinsic::ID ID);
+
 /// Get the stream from the given call to Kitsune's kernel launch intrinsic.
 Value *getStreamFromLaunch(const CallBase &call);
 

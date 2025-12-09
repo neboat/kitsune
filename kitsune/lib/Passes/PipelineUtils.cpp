@@ -13,6 +13,7 @@
 #include "kitsune/Passes/PipelineUtils.h"
 #include "kitsune/Analysis/TapirTargetAnalysis.h"
 #include "kitsune/CodeGen/CodeGenFatBinaries.h"
+#include "kitsune/CodeGen/LowerHyperIntrinsics.h"
 #include "kitsune/CodeGen/LowerKitsuneIntrinsics.h"
 #include "kitsune/CodeGen/StripKitsuneAddrSpaces.h"
 #include "kitsune/Transforms/EmbLinkLibDeviceBitcode.h"
@@ -83,6 +84,7 @@ llvm::populateKitPostTapirPasses(PassBuilder &pb, OptimizationLevel optLevel,
 
     pb.invokeKitsunePostTapirLateEPCallbacks(mpm, optLevel);
 
+    mpm.addPass(LowerHyperIntrinsicsPass());
     mpm.addPass(RecomputeKernelPropertiesPass());
     mpm.addPass(GenerateCtorsPass());
 
