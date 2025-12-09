@@ -69,6 +69,13 @@ kitsune_mobile_memcpy(void *dst, const void *src, size_t size) {
 
 #ifdef __cplusplus
 
+#include <atomic>
+
+template<typename T>
+inline void kitsune_atomic_add(std::atomic<T>* address, T val) {
+  __atomic_fetch_add(reinterpret_cast<T *>(address), val, __ATOMIC_SEQ_CST);
+}
+
 namespace kitsune {
 
 /// A mobile pointer.
