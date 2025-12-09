@@ -72,15 +72,10 @@ if (KITSUNE_CUDA_ENABLED)
     ${KITSUNE_CUDA_LIB_LIBS})
 
   if (KITCUDA_ENABLE_NVTX)
-    find_library(LIB_NVTOOLS_EXT nvToolsExt REQUIRED
-      PATHS ${KITSUNE_CUDA_LIBRARY_DIR}
-      NO_DEFAULT_PATH)
 
     target_compile_definitions(${KITSUNE_OBJLIB} PUBLIC
       KITCUDA_ENABLE_NVTX)
 
-    target_link_libraries(${KITSUNE_OBJLIB} PUBLIC
-      ${LIB_NVTOOLS_EXT})
   endif()
 endif()
 

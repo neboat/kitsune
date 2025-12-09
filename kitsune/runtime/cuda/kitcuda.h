@@ -460,7 +460,7 @@ extern CUcontext _kitcuda_context;
   }
 
 #ifdef KITCUDA_ENABLE_NVTX
-#include <nvToolsExt.h>
+#include <nvtx3/nvtx3.hpp>
 extern const int KIT_NVTX_INIT;
 extern const int KIT_NVTX_MEM;
 extern const int KIT_NVTX_STREAM;
