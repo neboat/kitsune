@@ -208,9 +208,6 @@ static bool addExceptionArgs(const ArgList &Args, types::ID InputType,
       CXXExceptionsEnabled =
           ExceptionArg->getOption().matches(options::OPT_fcxx_exceptions) ||
           ExceptionArg->getOption().matches(options::OPT_fexceptions);
-    } else if (D.IsKitsuneFrontend() &&
-               (TT.has_value() || Args.hasArg(options::OPT_kokkos))) {
-      CXXExceptionsEnabled = false;
     }
 
     if (CXXExceptionsEnabled) {
