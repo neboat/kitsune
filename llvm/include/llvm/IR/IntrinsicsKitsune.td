@@ -143,6 +143,11 @@ def int_kit_mobile_free
                 [IntrInaccessibleMemOrArgMemOnly,
                  NoCapture<ArgIndex<0>>, ReadNone<ArgIndex<0>>]>;
 
+def int_kit_mobile_realloc
+    : Intrinsic<[llvm_mobile_ptr_ty], [llvm_mobile_ptr_ty, llvm_i64_ty],
+                [IntrInaccessibleMemOrArgMemOnly, NoCapture<ArgIndex<0>>,
+                 ReadNone<ArgIndex<0>>, NoAlias<RetIndex>]>;
+
 // Enable launch refinement. Setting this will cause the runtime to calculate
 // a kernel's launch parameters based on some heuristic. In the case of NVIDIA
 // GPU's, this is an occupancy-based heuristic provided by cuda's API.

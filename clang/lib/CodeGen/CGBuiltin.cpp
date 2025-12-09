@@ -6325,6 +6325,16 @@ RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
     return RValue::get(Builder.CreateCall(F, {Ptr}));
   }
 
+  case Builtin::BIkitsune_mobile_realloc: {
+    Function *F = CGM.getIntrinsic(Intrinsic::kit_mobile_realloc);
+    llvm::FunctionType *FTy = F->getFunctionType();
+    Value *Ptr = EmitScalarExpr(E->getArg(0));
+    Value *Size = EmitScalarExpr(E->getArg(1));
+    if (Size->getType() != FTy->getParamType(1))
+      Size = Builder.CreateTruncOrBitCast(Size, FTy->getParamType(1));
+    return RValue::get(Builder.CreateCall(F, {Ptr, Size}));
+  }
+
   case Builtin::BI__kitsune_mobile_cast_unsafe: {
     Value *Ptr = EmitScalarExpr(E->getArg(0));
     LLVMContext &Ctxt = getLLVMContext();

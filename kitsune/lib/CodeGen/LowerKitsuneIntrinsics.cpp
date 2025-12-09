@@ -59,6 +59,7 @@ static const KitsuneRuntimeFuncMap kitCudaFuncs = {
     {Intrinsic::kit_initialize, LibFunc_kitcuda_initialize},
     {Intrinsic::kit_mobile_alloc, LibFunc_kitcuda_managed_malloc},
     {Intrinsic::kit_mobile_free, LibFunc_kitcuda_managed_free},
+    {Intrinsic::kit_mobile_realloc, LibFunc_kitcuda_managed_realloc},
     {Intrinsic::kit_set_fixed_tpb, LibFunc_kitcuda_set_fixed_tpb},
     {Intrinsic::kit_set_max_tpb, LibFunc_kitcuda_set_max_tpb},
     {Intrinsic::kit_symbol_device_ptr, LibFunc_kitcuda_symbol_device_ptr},
@@ -80,6 +81,7 @@ static const KitsuneRuntimeFuncMap kitHipFuncs = {
     {Intrinsic::kit_initialize, LibFunc_kithip_initialize},
     {Intrinsic::kit_mobile_alloc, LibFunc_kithip_managed_malloc},
     {Intrinsic::kit_mobile_free, LibFunc_kithip_managed_free},
+    {Intrinsic::kit_mobile_realloc, LibFunc_kithip_managed_realloc},
     {Intrinsic::kit_set_fixed_tpb, LibFunc_kithip_set_fixed_tpb},
     {Intrinsic::kit_set_max_tpb, LibFunc_kithip_set_max_tpb},
     {Intrinsic::kit_symbol_device_ptr, LibFunc_kithip_symbol_device_ptr},
@@ -243,6 +245,9 @@ private:
     case Intrinsic::kit_mobile_free:
       return getMobileMemFunc(m, id, LibFunc_free);
 
+    case Intrinsic::kit_mobile_realloc:
+      return getMobileMemFunc(m, id, LibFunc_realloc);
+
     case Intrinsic::kit_enable_verbose:
       // Intrinsics with runtime functions that are independent of a tapir
       // target.
@@ -379,6 +384,40 @@ private:
     return true;
   }
 
+  /// Depending on the tapir target to be used, this may not replace the call.
+  /// In that case, return false. Otherwise, return true.
+  bool lowerMobileRealloc(CallInst &call) {
+    FunctionCallee f = getRuntimeFunc(call);
+    if (not f.getCallee())
+      return false;
+
+    std::vector<Value *> args;
+    for (Use &arg : call.args()) {
+      if (arg->getType()->isPointerTy()) {
+        args.push_back(arg->stripPointerCasts());
+        continue;
+      }
+      args.push_back(arg.get());
+    }
+
+    BasicBlock::iterator pos = call.getIterator();
+    Type *retTy = call.getType();
+
+    // The result of the new call will be a pointer in the default address
+    // space. However, all uses of the call will be in the mobile address
+    // space.
+    CallInst *newCall = createNewCallFor(call, f, args);
+    CastInst *cst =
+        CastInst::Create(Instruction::AddrSpaceCast, newCall, retTy, "", pos);
+    newCall->setAttributes(createNewAttrList(call, {0}));
+
+    cst->moveAfter(newCall);
+    call.replaceAllUsesWith(cst);
+    call.eraseFromParent();
+
+    return true;
+  }
+
   /// Lower the kernel launch intrinsic. This is a vararg intrinsic, but the
   /// corresponding runtime functions need the arguments to be passed an array
   /// of pointers to the arguments. We implement this by creating a stack slot
@@ -476,6 +515,10 @@ private:
 
     case Intrinsic::kit_mobile_free:
       changed |= lowerMobileFree(call);
+      break;
+
+    case Intrinsic::kit_mobile_realloc:
+      changed |= lowerMobileRealloc(call);
       break;
 
     case Intrinsic::kit_async_launch_kernel:

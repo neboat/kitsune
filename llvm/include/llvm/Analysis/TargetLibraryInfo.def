@@ -2780,6 +2780,11 @@ TLI_DEFINE_ENUM_INTERNAL(kitcuda_managed_malloc)
 TLI_DEFINE_STRING_INTERNAL("__kitcuda_mem_alloc_managed")
 TLI_DEFINE_SIG_INTERNAL(Ptr, SizeT)
 
+/// void* __kitcuda_mem_realloc_managed(void*, size_t)
+TLI_DEFINE_ENUM_INTERNAL(kitcuda_managed_realloc)
+TLI_DEFINE_STRING_INTERNAL("__kitcuda_mem_realloc_managed")
+TLI_DEFINE_SIG_INTERNAL(Ptr, Ptr, SizeT)
+
 /// void __kitcuda_mem_host_prefetch(void* ptr, void* stream);
 TLI_DEFINE_ENUM_INTERNAL(kitcuda_prefetch_dtoh)
 TLI_DEFINE_STRING_INTERNAL("__kitcuda_mem_host_prefetch")
@@ -2875,6 +2880,11 @@ TLI_DEFINE_SIG_INTERNAL(Void, Ptr)
 TLI_DEFINE_ENUM_INTERNAL(kithip_managed_malloc)
 TLI_DEFINE_STRING_INTERNAL("__kithip_mem_alloc_managed")
 TLI_DEFINE_SIG_INTERNAL(Ptr, SizeT)
+
+/// void* __kithip_mem_realloc_managed(void*, size_t)
+TLI_DEFINE_ENUM_INTERNAL(kithip_managed_realloc)
+TLI_DEFINE_STRING_INTERNAL("__kithip_mem_realloc_managed")
+TLI_DEFINE_SIG_INTERNAL(Ptr, Ptr, SizeT)
 
 /// void __kithip_mem_host_prefetch(void* ptr, void* stream);
 TLI_DEFINE_ENUM_INTERNAL(kithip_prefetch_dtoh)

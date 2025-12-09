@@ -5182,6 +5182,14 @@ def KitsuneMobileDealloc : LangBuiltin<"ALL_LANGUAGES"> {
   let Prototype = "void(void!)"; // ! here means `*[[kitsune::mobile]]`
 }
 
+// Reallocate a mobile buffer. This takes a single arguments which is the number
+// of bytes to allocate. ALL_LANGUAGES here includes C, C++ and Objective-C.
+def KitsuneMobileRealloc : LangBuiltin<"ALL_LANGUAGES"> {
+  let Spellings = ["kitsune_mobile_realloc"];
+  let Attributes = [CustomTypeChecking];
+  let Prototype = "void!(void!,size_t)"; // ! here means `*[[kitsune::mobile]]`
+}
+
 // Casts from bare pointers to mobile pointers are not allowed. But we do need
 // to perform these casts Kitsune's runtime which actually allocates memory.
 // Since Kitsune's runtime is only expected to be built with Kitsune, we can
