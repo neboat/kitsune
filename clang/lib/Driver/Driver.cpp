@@ -336,18 +336,6 @@ static void CheckKitsuneOptions(const Driver &D, const ArgList &Args,
     if (IsLTO && speedupLevel < 2)
       D.Diag(clang::diag::err_drv_kitsune_lto_o2_required);
 
-    // With the cuda tapir target, if debug info is enabled, ptxas cannot be
-    // run with optimizations because it does not support "optimized debugging".
-    // Just emit a warning so the user is aware of the consequences of using
-    // this combination of options.
-    if (*TT == llvm::TTID::Cuda && Args.getLastArg(options::OPT_g_Group)) {
-      if (speedupLevel == 1) {
-        D.Diag(clang::diag::warn_drv_kitsune_cuda_optzns_debug) << speedupLevel;
-      } else if (speedupLevel > 1) {
-        D.Diag(clang::diag::err_drv_kitsune_cuda_optzns_debug);
-        return;
-      }
-    }
   }
 
   // Check that the --tapir-cuda-arch option has a valid value. If an empty
