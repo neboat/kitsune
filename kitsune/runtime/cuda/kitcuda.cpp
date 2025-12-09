@@ -82,6 +82,11 @@ static int _kitcuda_max_threads_per_blk;
 static int _kitcuda_warp_size;
 static int _kitcuda_supports_gpu_overlap;
 static int _kitcuda_supports_concurrent_kerns;
+static int _kitcuda_supports_unified_addressing;
+static int _kitcuda_supports_managed_memory;
+static int _kitcuda_supports_concurrent_managed_access;
+static int _kitcuda_supports_pageable_memory_access;
+static int _kitcuda_supports_pageable_memory_access_huge_pages;
 static int _kitcuda_max_regs_per_blk;
 static int _kitcuda_major_compute_capability;
 static int _kitcuda_minor_compute_capability;
@@ -165,6 +170,22 @@ bool __kitcuda_initialize() {
   CU_SAFE_CALL(cuDeviceGetAttribute_p(&_kitcuda_supports_concurrent_kerns,
                                       CU_DEVICE_ATTRIBUTE_CONCURRENT_KERNELS,
                                       _kitcuda_device));
+  CU_SAFE_CALL(cuDeviceGetAttribute_p(&_kitcuda_supports_unified_addressing,
+                                      CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING,
+                                      _kitcuda_device));
+  CU_SAFE_CALL(cuDeviceGetAttribute_p(&_kitcuda_supports_managed_memory,
+                                      CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY,
+                                      _kitcuda_device));
+  CU_SAFE_CALL(cuDeviceGetAttribute_p(
+      &_kitcuda_supports_concurrent_managed_access,
+      CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS, _kitcuda_device));
+  CU_SAFE_CALL(cuDeviceGetAttribute_p(
+      &_kitcuda_supports_pageable_memory_access,
+      CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS, _kitcuda_device));
+  CU_SAFE_CALL(cuDeviceGetAttribute_p(
+      &_kitcuda_supports_pageable_memory_access_huge_pages,
+      CU_DEVICE_ATTRIBUTE_PAGEABLE_MEMORY_ACCESS_USES_HOST_PAGE_TABLES,
+      _kitcuda_device));
   CU_SAFE_CALL(cuDeviceGetAttribute_p(
       &_kitcuda_max_regs_per_blk, CU_DEVICE_ATTRIBUTE_MAX_REGISTERS_PER_BLOCK,
       _kitcuda_device));
@@ -196,6 +217,16 @@ bool __kitcuda_initialize() {
             _kitcuda_max_regs_per_blk);
     fprintf(stderr, "             concurrent kerns: %d\n",
             _kitcuda_supports_concurrent_kerns);
+    fprintf(stderr, "             UVM:              %d\n",
+            _kitcuda_supports_unified_addressing);
+    fprintf(stderr, "             mngd mem:         %d\n",
+            _kitcuda_supports_managed_memory);
+    fprintf(stderr, "             concurr mngd acc: %d\n",
+            _kitcuda_supports_concurrent_managed_access);
+    fprintf(stderr, "             pageable mem acc: %d\n",
+            _kitcuda_supports_pageable_memory_access);
+    fprintf(stderr, "             huge pages:       %d\n",
+            _kitcuda_supports_pageable_memory_access_huge_pages);
     fprintf(stderr, "             gpu overlap:      %d\n",
             _kitcuda_supports_gpu_overlap);
   }
