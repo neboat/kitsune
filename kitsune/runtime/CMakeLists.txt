@@ -77,6 +77,43 @@ if (KITSUNE_CUDA_ENABLED)
       KITCUDA_ENABLE_NVTX)
 
   endif()
+
+  find_program(LLVM_LINK llvm-link PATHS ${LLVM_BINARY_DIR}/bin NO_DEFAULT_PATH)
+  find_program(LLVM_CLANGXX clang++ PATHS ${LLVM_BINARY_DIR}/bin NO_DEFAULT_PATH)
+
+  set(KITCUDA_BC_FILE ${CMAKE_CURRENT_BINARY_DIR}/kitcuda.bc)
+  set(KITCUDA_BC_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/cuda/scan_inlined.cu
+    ${CMAKE_CURRENT_SOURCE_DIR}/cuda/reduce_inlined.cu
+  )
+  set(KITCUDA_INDIVIDUAL_BC_FILES "")
+  # Loop through each source file and generate bitcode
+  foreach(CU_SOURCE_FILE ${KITCUDA_BC_SOURCES})
+    get_filename_component(CU_FILENAME ${CU_SOURCE_FILE} NAME_WE) # Get base name without extension
+    set(CU_BC_FILE ${CMAKE_CURRENT_BINARY_DIR}/${CU_FILENAME}-cuda-nvptx64-nvidia-cuda-${KITSUNE_CUDA_ARCH_DEFAULT}.bc)
+    add_custom_command(
+      OUTPUT ${CU_BC_FILE}
+      COMMAND ${LLVM_CLANGXX} -x cuda -O2 ${CU_SOURCE_FILE} -DGEN_BITCODE
+                              --cuda-gpu-arch=${KITSUNE_CUDA_ARCH_DEFAULT} -c -emit-llvm
+                              --no-offload-new-driver
+                               -gline-directives-only
+      DEPENDS ${CU_SOURCE_FILE}
+      COMMENT "Generating CUDA bitcode for ${CU_FILENAME}.cu"
+      VERBATIM
+    )
+    list(APPEND KITCUDA_INDIVIDUAL_BC_FILES ${CU_BC_FILE})
+  endforeach()
+  set(KITCUDA_BC_FILE ${CMAKE_CURRENT_BINARY_DIR}/kitcuda.bc)
+  add_custom_command(
+    OUTPUT ${KITCUDA_BC_FILE}
+    COMMAND ${LLVM_LINK} -o ${KITCUDA_BC_FILE} ${KITCUDA_INDIVIDUAL_BC_FILES}
+    DEPENDS ${KITCUDA_INDIVIDUAL_BC_FILES} # Depends on all intermediate files
+    COMMENT "Linking CUDA bitcode modules into kitcuda.bc"
+    VERBATIM
+  )
+  add_custom_target(kitcuda_bc_target ALL DEPENDS ${KITCUDA_BC_FILE})
+  add_dependencies(${KITSUNE_OBJLIB} kitcuda_bc_target)
+  install(FILES ${KITCUDA_BC_FILE} DESTINATION ${CLANG_RESOURCE_SUBDIR}/lib)
 endif()
 
 # The KITSUNE_HIP_* variables are defined in kitsune/CMakeLists.txt. They are

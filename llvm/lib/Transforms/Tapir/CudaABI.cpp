@@ -132,6 +132,16 @@ cl::opt<bool> clRefineLaunches(
     cl::desc("Enable runtime's refinement of launch parameters"),
     cl::cat(cl::catKitClDevOpts));
 
+cl::opt<bool> UseKitCudaRuntimeBC(
+    "use-kitcuda-runtime-bc", cl::init(true),
+    cl::desc("Use a bitcode file for the Kitsune CUDA runtime ABI"),
+    cl::Hidden);
+
+cl::opt<std::string> ClKitCudaRuntimeBCPath(
+    "kitcuda-runtime-bc-path", cl::init(""),
+    cl::desc("Path to the bitcode file for the Kitsune CUDA runtime ABI"),
+    cl::Hidden);
+
 /// This prefix is intentionally *NOT* __kitcuda to ensure that there is no
 /// confusion - and, more importantly, no collisions - between any names
 /// prefixed with this and the symbols from kitsune's cuda runtime which are
@@ -522,6 +532,37 @@ void CudaABI::preProcessRootSpawner(Function &, BasicBlock *TFEntry) {}
 
 void CudaABI::postProcessModule() {
   LLVM_DEBUG(dbgs() << "cuabi: post processing kernel and host modules...\n");
+
+  // Link in the Bitcode file
+  if (UseKitCudaRuntimeBC) {
+    SMDiagnostic SMD;
+    LLVMContext &C = KernelModule.getContext();
+    // Parse the bitcode file.  This call imports structure definitions, but not
+    // function definitions.
+    if (std::unique_ptr<Module> ExternalModule =
+            parseIRFile(ClKitCudaRuntimeBCPath, SMD, C)) {
+      // Link the external module into the current module, copying over global
+      // values.
+      bool Fail = Linker::linkModules(KernelModule, std::move(ExternalModule),
+                                      Linker::Flags::LinkOnlyNeeded);
+      if (Fail)
+        C.emitError("CudaABI: Failed to link bitcode ABI file: " +
+                    Twine(ClKitCudaRuntimeBCPath));
+    } else {
+      C.emitError("CudaABI: Failed to parse bitcode ABI file: " +
+                  Twine(ClKitCudaRuntimeBCPath));
+    }
+  }
+
+  if (verifyModule(KernelModule, &errs())) {
+    LLVM_DEBUG(dbgs() << "Kernel Module before embedding:" << KernelModule);
+    llvm_unreachable("Loop spawning produced bad IR!");
+  }
+
+  if (verifyModule(M, &errs())) {
+    LLVM_DEBUG(dbgs() << "Host Module before embedding:" << M);
+    llvm_unreachable("Loop spawning produced bad IR!");
+  }
 
   // At this point, we are done with the minimum task of outlining the tapir
   // loop into a kernel module. There are still a number of transformations that
