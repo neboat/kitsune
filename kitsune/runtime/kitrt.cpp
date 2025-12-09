@@ -52,6 +52,7 @@
 
 #include "kitrt.h"
 #include <cassert>
+#include <cstdarg>
 
 bool _kitrt_verbose_mode = false;
 
@@ -84,6 +85,15 @@ void __kitrt_print_stack_trace(void) {
     fprintf(stderr, "  ---- end trace ----\n");
   }
   free(strings);
+}
+
+void __kitrt_verbose_printf(const char *fmt, ...) {
+  if (!__kitrt_verbose_mode())
+    return;
+  std::va_list l;
+  va_start(l, fmt);
+  std::vfprintf(stderr, fmt, l);
+  va_end(l);
 }
 
 #ifdef __cplusplus

@@ -165,7 +165,7 @@ int next_lowest_factor(int n, int m) {
 void __kitcuda_refine_launch_params(size_t trip_count, CUfunction cu_func,
                                     int &threads_per_blk, int &blks_per_grid,
                                     const KitRTInstMix *inst_mix) {
-  KIT_NVTX_PUSH("kitcuda:get_launch_params", KIT_NVTX_LAUNCH);
+  KIT_NVTX nvtx_raii("kitcuda:get_launch_params", KIT_NVTX_LAUNCH);
 
   // As a default starting point, use CUDA's occupancy heuristic to get
   // an initial occupancy.  At present we have seen this call do nothing
@@ -236,7 +236,6 @@ void __kitcuda_refine_launch_params(size_t trip_count, CUfunction cu_func,
   }
 
   blks_per_grid = (trip_count + threads_per_blk - 1) / threads_per_blk;
-  KIT_NVTX_POP();
 }
 
 static int __kitcuda_reg_analysis(int threads_per_blk, int regs_per_thread,
@@ -287,7 +286,7 @@ static int __kitcuda_reg_analysis(int threads_per_blk, int regs_per_thread,
 void __kitcuda_get_launch_params(size_t trip_count, CUfunction cu_func,
                                  int &threads_per_blk, int &blks_per_grid,
                                  const KitRTInstMix *inst_mix) {
-  KIT_NVTX_PUSH("kitcuda:get_launch_params", KIT_NVTX_LAUNCH);
+  KIT_NVTX nvtx_raii("kitcuda:get_launch_params", KIT_NVTX_LAUNCH);
 
   // EXPERIMENTAL: Our 'forall' kernels have zero shared memory usage so
   // tweak the kernel's cache configuration to prefer L1 usage vs. shared
@@ -346,7 +345,6 @@ void __kitcuda_get_launch_params(size_t trip_count, CUfunction cu_func,
 
   // TODO: This looks redundant with code in launch kernel...
   blks_per_grid = (trip_count + threads_per_blk - 1) / threads_per_blk;
-  KIT_NVTX_POP();
 }
 
 void *__kitcuda_launch_kernel(const void *fat_bin, const char *kernel_name,
@@ -358,7 +356,7 @@ void *__kitcuda_launch_kernel(const void *fat_bin, const char *kernel_name,
   assert(kern_args && "kitcuda: launch with null args!");
   assert(trip_count != 0 && "kitcuda: launch with zero trips!");
 
-  KIT_NVTX_PUSH("kitcuda:launch_kernel", KIT_NVTX_LAUNCH);
+  KIT_NVTX nvtx_raii("kitcuda:launch_kernel", KIT_NVTX_LAUNCH);
 
   // Multiple threads can launch kernels in our current design.  If a
   // thread enters without having previously set the context the CUDA
@@ -430,21 +428,17 @@ void *__kitcuda_launch_kernel(const void *fat_bin, const char *kernel_name,
   if (opaque_stream == nullptr) {
     // create a stream for this launch...
     cu_stream = (CUstream)__kitcuda_get_thread_stream();
-    if (__kitrt_verbose_mode())
-      fprintf(stderr,
-              "kitcuda: launch stream is null, requested a new stream.\n");
+    KIT_VERBOSE_PRINT("kitcuda: launch stream is null, requested a new stream.\n");
   } else {
     // use the provided stream for this launch...
     cu_stream = (CUstream)opaque_stream;
-    if (__kitrt_verbose_mode())
-      fprintf(stderr, "kitcuda: launch stream is non-null.\n");
+    KIT_VERBOSE_PRINT("kitcuda: launch stream is non-null.\n");
   }
 
   CU_SAFE_CALL(cuLaunchKernel_p(cu_func, blks_per_grid, 1, 1, threads_per_blk,
                                 1, 1,
                                 0, // shared mem size
                                 cu_stream, kern_args, NULL));
-  KIT_NVTX_POP();
   return (void *)cu_stream;
 }
 
@@ -452,7 +446,7 @@ uint64_t __kitcuda_get_global_symbol(void *fat_bin, const char *sym_name) {
   assert(fat_bin && "null fat binary!");
   assert(sym_name && "null symbol name!");
 
-  KIT_NVTX_PUSH("kitcuda:get_global_symbol", KIT_NVTX_LAUNCH);
+  KIT_NVTX nvtx_raii("kitcuda:get_global_symbol", KIT_NVTX_LAUNCH);
 
   // Multiple threads can launch kernels in the current design.  If a
   // thread enters without having previously set the context the CUDA
@@ -503,7 +497,6 @@ uint64_t __kitcuda_get_global_symbol(void *fat_bin, const char *sym_name) {
     abort();
   }
 
-  KIT_NVTX_POP();
   return sym_ptr;
 }
 

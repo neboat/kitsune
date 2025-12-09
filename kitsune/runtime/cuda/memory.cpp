@@ -60,7 +60,7 @@ extern "C" {
 
 [[gnu::malloc]] void *[[kitsune::mobile]]
 __kitcuda_mem_alloc_managed(size_t size) {
-  KIT_NVTX_PUSH("kitcuda:mem_alloc_managed", KIT_NVTX_MEM);
+  KIT_NVTX nvtx_raii("kitcuda:mem_alloc_managed", KIT_NVTX_MEM);
 
   extern bool _kitcuda_initialized;
   if (not _kitcuda_initialized)
@@ -104,7 +104,6 @@ __kitcuda_mem_alloc_managed(size_t size) {
   // NOTE: We can no longer do this in a thread-safe manner...
   // CU_SAFE_CALL(cuMemPrefetchAsync_p(devp, size, _kitcuda_device,
   //                                  __kitcuda_get_thread_stream()));
-  KIT_NVTX_POP();
   return __kitsune_mobile_cast_unsafe((void *)devp);
 }
 
@@ -113,7 +112,7 @@ __kitcuda_mem_calloc_managed(size_t count, size_t element_size) {
   assert(count != 0 && "zero-valued item count!");
   assert(element_size != 0 && "zero-valued element size!");
 
-  KIT_NVTX_PUSH("kitcuda:calloc_managed", KIT_NVTX_MEM);
+  KIT_NVTX nvtx_raii("kitcuda:calloc_managed", KIT_NVTX_MEM);
 
   size_t nbytes = count * element_size;
   CUdeviceptr memp = (CUdeviceptr)__kitcuda_mem_alloc_managed(nbytes);
@@ -129,7 +128,6 @@ __kitcuda_mem_calloc_managed(size_t count, size_t element_size) {
   //
   // TODO: We're not set to run on anything but the default stream...
   CU_SAFE_CALL(cuMemsetD8Async_p(memp, 0, nbytes, NULL));
-  KIT_NVTX_POP();
   return __kitsune_mobile_cast_unsafe((void *)memp);
 }
 
@@ -137,7 +135,7 @@ __kitcuda_mem_calloc_managed(size_t count, size_t element_size) {
     void *[[kitsune::mobile]] ptr, size_t size) {
   assert(size != 0 && "zero-valued size!");
 
-  KIT_NVTX_PUSH("kitcuda:realloc_managed", KIT_NVTX_MEM);
+  KIT_NVTX nvtx_raii("kitcuda:realloc_managed", KIT_NVTX_MEM);
   void *[[kitsune::mobile]] memptr = nullptr;
   if (ptr == nullptr)
     memptr = __kitcuda_mem_alloc_managed(size);
@@ -148,7 +146,6 @@ __kitcuda_mem_calloc_managed(size_t count, size_t element_size) {
         __kitrt_get_mem_alloc_size((void *)ptr, &read_only, &write_only);
     if (nbytes == 0) {
       fprintf(stderr, "kitcuda: warning, realloc() on untracked allocation!\n");
-      KIT_NVTX_POP();
       return nullptr;
     }
 
@@ -171,14 +168,13 @@ __kitcuda_mem_calloc_managed(size_t count, size_t element_size) {
       memptr = ptr; // same size, just return it...
     }
   }
-  KIT_NVTX_POP();
   return memptr;
 }
 
 void __kitcuda_mem_free(void *[[kitsune::mobile]] vp) {
   assert(vp && "unexpected null pointer!");
 
-  KIT_NVTX_PUSH("kitcuda:mem_free", KIT_NVTX_MEM);
+  KIT_NVTX nvtx_raii("kitcuda:mem_free", KIT_NVTX_MEM);
   // We first remove the allocation from the runtime's
   // map, and then actually release it via CUDA...
   // Note that the versioned free calls are important
@@ -188,22 +184,20 @@ void __kitcuda_mem_free(void *[[kitsune::mobile]] vp) {
   __kitrt_unregister_mem_alloc(vp);
   _kitcuda_mem_alloc_mutex.unlock();
   CU_SAFE_CALL(cuMemFree_v2_p((CUdeviceptr)vp));
-  KIT_NVTX_POP();
 }
 
 void __kitcuda_mem_destroy(void *vp) {
   // This entry point is used to clean up only the
   // CUDA portions of an allocation -- it is used
   // by the runtime at program exit.
-  KIT_NVTX_PUSH("kitcuda: mem_destroy", KIT_NVTX_MEM);
+  KIT_NVTX nvtx_raii("kitcuda: mem_destroy", KIT_NVTX_MEM);
   CU_SAFE_CALL(cuMemFree_v2_p((CUdeviceptr)vp));
-  KIT_NVTX_POP();
 }
 
 bool __kitcuda_is_mem_managed(void *vp) {
   assert(vp && "unexpected null pointer!");
   assert(__kitcuda_is_initialized() && "kitrt: runtime not initialized!");
-  KIT_NVTX_PUSH("kitcuda:is_mem_managed", KIT_NVTX_MEM);
+  KIT_NVTX nvtx_raii("kitcuda:is_mem_managed", KIT_NVTX_MEM);
 
   CUdeviceptr devp = (CUdeviceptr)vp;
   unsigned int is_managed;
@@ -212,7 +206,6 @@ bool __kitcuda_is_mem_managed(void *vp) {
   // assume the pointer is unmanaged and return false accordingly.
   CUresult r = cuPointerGetAttribute_p(&is_managed,
                                        CU_POINTER_ATTRIBUTE_IS_MANAGED, devp);
-  KIT_NVTX_POP();
   return (r == CUDA_SUCCESS) && is_managed;
 }
 
@@ -221,7 +214,7 @@ bool __kitcuda_is_mem_managed(void *vp) {
 void *__kitcuda_mem_gpu_prefetch(void *vp, void *opaque_stream) {
   assert(vp && "unexpected null pointer!");
 
-  KIT_NVTX_PUSH("kitcuda:mem_gpu_prefetch", KIT_NVTX_MEM);
+  KIT_NVTX nvtx_raii("kitcuda:mem_gpu_prefetch", KIT_NVTX_MEM);
 
   size_t size = 0;
   // TODO: Prefetching details and approaches need to be further
@@ -308,7 +301,6 @@ void *__kitcuda_mem_gpu_prefetch(void *vp, void *opaque_stream) {
     }
   }
 
-  KIT_NVTX_POP();
   // no prefetch, bind inbound stream by default...
   return opaque_stream;
 }
@@ -316,7 +308,7 @@ void *__kitcuda_mem_gpu_prefetch(void *vp, void *opaque_stream) {
 void *__kitcuda_mem_host_prefetch(void *vp, void *opaque_stream) {
   assert(vp && "unexpected null pointer!");
 
-  KIT_NVTX_PUSH("kitcuda:mem_host_prefetch", KIT_NVTX_MEM);
+  KIT_NVTX nvtx_raii("kitcuda:mem_host_prefetch", KIT_NVTX_MEM);
 
   // TODO: Prefetching details and approaches need to be further
   // explored.  In particular, in concert with compiler analysis and
@@ -375,7 +367,6 @@ void *__kitcuda_mem_host_prefetch(void *vp, void *opaque_stream) {
       return cu_stream;
     }
   }
-  KIT_NVTX_POP();
   return nullptr;
 }
 
@@ -391,9 +382,8 @@ void __kitcuda_memcpy_sym_to_device(void *hostPtr, uint64_t devPtr,
   // runtime is due for a major overhaul, just stick with this for now so the
   // test suite is green (without this change, saxpy - the only test that, as of
   // the time of writing, uses this - fails).
-  KIT_NVTX_PUSH("kitcuda:memcpy_sym_to_device", KIT_NVTX_MEM);
+  KIT_NVTX nvtx_raii("kitcuda:memcpy_sym_to_device", KIT_NVTX_MEM);
   CU_SAFE_CALL(cuMemcpyHtoD(devPtr, hostPtr, size));
-  KIT_NVTX_POP();
 }
 
 void __kitcuda_memcpy_sym_to_host(uint64_t devPtr, void *hostPtr,
@@ -408,8 +398,7 @@ void __kitcuda_memcpy_sym_to_host(uint64_t devPtr, void *hostPtr,
   // runtime is due for a major overhaul, just stick with this for now so the
   // test suite is green (without this change, saxpy - the only test that, as of
   // the time of writing, uses this - fails).
-  KIT_NVTX_PUSH("kitcuda:memcpy_sym_to_host", KIT_NVTX_MEM);
+  KIT_NVTX nvtx_raii("kitcuda:memcpy_sym_to_host", KIT_NVTX_MEM);
   CU_SAFE_CALL(cuMemcpyDtoH(hostPtr, devPtr, size));
-  KIT_NVTX_POP();
 }
 }

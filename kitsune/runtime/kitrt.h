@@ -113,6 +113,9 @@ inline bool __kitrt_verbose_mode() {
   return _kitrt_verbose_mode;
 }
 
+void __kitrt_verbose_printf(const char *fmt, ...);
+#define KIT_VERBOSE_PRINT(...) __kitrt_verbose_printf(__VA_ARGS__)
+
 /**
  * Provide a backtrace to stderr to help track down runtime crashes.
  */

@@ -90,8 +90,10 @@ void *__kitcuda_get_thread_stream() {
 
 void __kitcuda_sync_thread_stream(void *opaque_stream) {
   assert(opaque_stream != nullptr && "unexpected null stream pointer!");
-  KIT_NVTX_PUSH("kitcuda:sync_thread_stream", KIT_NVTX_STREAM);
-  
+  KIT_NVTX nvtx_raii("kitcuda:sync_thread_stream", KIT_NVTX_STREAM);
+
+  KIT_VERBOSE_PRINT("kitcuda sync_thread_stream %p\n", opaque_stream);
+
   CUstream stream = (CUstream)opaque_stream;
   CU_SAFE_CALL(cuStreamSynchronize_p(stream));
 
@@ -101,11 +103,10 @@ void __kitcuda_sync_thread_stream(void *opaque_stream) {
   _kitcuda_stream_mutex.unlock();
   // UNLOCK
   
-  KIT_NVTX_POP();
 }
 
 void __kitcuda_sync_context() {
-  KIT_NVTX_PUSH("kitcuda:sync_context", KIT_NVTX_STREAM);
+  KIT_NVTX nvtx_raii("kitcuda:sync_context", KIT_NVTX_STREAM);
   
   CUcontext ctx;
   // TODO: We have multiple calls to set the context for the calling
@@ -114,7 +115,6 @@ void __kitcuda_sync_context() {
   if (ctx == NULL)
     CU_SAFE_CALL(cuCtxSetCurrent_p(__kitcuda_get_context()));
   CU_SAFE_CALL(cuCtxSynchronize_p());
-  KIT_NVTX_POP();
 }
 
 void __kitcuda_delete_thread_stream(void *opaque_stream) {
@@ -135,7 +135,9 @@ void __kitcuda_delete_thread_stream(void *opaque_stream) {
 }
 
 void __kitcuda_destroy_thread_streams() {
-  KIT_NVTX_PUSH("kitrt:delete_thread_streams", KIT_NVTX_STREAM);
+  KIT_NVTX nvtx_raii("kitrt:delete_thread_streams", KIT_NVTX_STREAM);
+
+  KIT_VERBOSE_PRINT("kitcuda destroy_thread_streams\n");
 
   // LOCK 
   _kitcuda_stream_mutex.lock();
@@ -147,7 +149,6 @@ void __kitcuda_destroy_thread_streams() {
   _kitcuda_stream_mutex.unlock();
   // UNLOCK
   
-  KIT_NVTX_POP();
 }
 
 } // extern "C"

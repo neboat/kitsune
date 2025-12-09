@@ -68,7 +68,7 @@
 static const char *CUDA_DSO_LIBNAME = "libcuda.so";
 
 bool __kitcuda_load_symbols() {
-  KIT_NVTX_PUSH("kitcuda:load_symbols", KIT_NVTX_INIT);
+  KIT_NVTX nvtx_raii("kitcuda:load_symbols", KIT_NVTX_INIT);
 
   // NOTE: The handle variable below is named to support use of macros for each
   // load call below -- changing the name will break things... TODO: we should
@@ -158,8 +158,6 @@ bool __kitcuda_load_symbols() {
   /* Error handling */
   DLSYM_LOAD(cuGetErrorName);
   DLSYM_LOAD(cuGetErrorString);
-
-  KIT_NVTX_POP();
 
   return true;
 }

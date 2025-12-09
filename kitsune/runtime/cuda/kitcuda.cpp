@@ -103,10 +103,9 @@ const int KIT_NVTX_CLEANUP = 4;
 extern "C" {
 
 bool __kitcuda_initialize() {
-  KIT_NVTX_PUSH("kitcuda: initialize", KIT_NVTX_INIT);
+  KIT_NVTX nvtx_raii("kitcuda: initialize", KIT_NVTX_INIT);
   if (_kitcuda_initialized) {
-    if (__kitrt_verbose_mode())
-      fprintf(stderr, "kitcuda: warning, multiple initialization calls!\n");
+    KIT_VERBOSE_PRINT("kitcuda: warning, multiple initialization calls!\n");
     return true;
   }
 
@@ -247,8 +246,6 @@ bool __kitcuda_initialize() {
                         disable_refined_launches);
   if (disable_refined_launches)
     __kitcuda_enable_launch_refinement(false);
-  
-  KIT_NVTX_POP();
   return _kitcuda_initialized;
 }
 
@@ -256,13 +253,12 @@ void __kitcuda_destroy() {
   if (not _kitcuda_initialized)
     return;
 
-  KIT_NVTX_PUSH("kitcuda:destroy", KIT_NVTX_CLEANUP);
+  KIT_NVTX nvtx_raii("kitcuda:destroy", KIT_NVTX_CLEANUP);
   __kitcuda_destroy_thread_streams();
   __kitrt_destroy_memory_map(__kitcuda_mem_destroy);
   // Note that all resources associated with the context will be destroyed.
   CU_SAFE_CALL(cuDevicePrimaryCtxReset_v2_p(_kitcuda_device));
   _kitcuda_initialized = false;
-  KIT_NVTX_POP();
 }
 
 } // extern "C"

@@ -490,11 +490,16 @@ extern const int KIT_NVTX_CLEANUP;
 #else
 #define KIT_NVTX_PUSH(name, cid)
 #define KIT_NVTX_POP()
-#define KIT_NVTX_INIT
-#define KIT_NVTX_MEM
-#define KIT_NVTX_STREAM
-#define KIT_NVTX_LAUNCH
-#define KIT_NVTX_CLEANUP
+#define KIT_NVTX_INIT 0
+#define KIT_NVTX_MEM 0
+#define KIT_NVTX_STREAM 0
+#define KIT_NVTX_LAUNCH 0
+#define KIT_NVTX_CLEANUP 0
 #endif
+
+struct KIT_NVTX {
+  KIT_NVTX(const char *name, int c) { KIT_NVTX_PUSH(name, c); }
+  ~KIT_NVTX() { KIT_NVTX_POP(); }
+};
 
 #endif // __KITCUDA_H__
