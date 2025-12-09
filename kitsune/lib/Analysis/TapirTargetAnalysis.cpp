@@ -38,7 +38,8 @@ static cl::opt<bool>
 static const std::vector<TTID> noTTs;
 
 static std::unique_ptr<TapirTarget> createTT(TTID id, Module &m,
-                                             const TTOptions &tto) {
+                                             const TTOptions &tto,
+                                             ModuleAnalysisManager &AM) {
   // Yes, this is absolutely hideous. We should try to find a nicer way than
   // this horrendous conditionally compiled mess!
   switch (id) {
@@ -57,7 +58,7 @@ static std::unique_ptr<TapirTarget> createTT(TTID id, Module &m,
 
 #if KITSUNE_CUDA_ENABLED
   case TTID::Cuda:
-    return std::make_unique<CudaABI>(m, tto);
+    return std::make_unique<CudaABI>(m, tto, AM);
 #endif // KITSUNE_CUDA_ENABLED
 
 #if KITSUNE_HIP_ENABLED
@@ -217,7 +218,7 @@ TapirTargetAnalysis::run(Module &m, ModuleAnalysisManager &mam) {
   ids.push_back(ttInfo.getTTID());
   for (TTID id : ids) {
     if (not ttInfo.hasTT(id)) {
-      tts[id] = createTT(id, m, tto);
+      tts[id] = createTT(id, m, tto, mam);
       ttInfo.addTT(id, tts.at(id).get());
     }
   }

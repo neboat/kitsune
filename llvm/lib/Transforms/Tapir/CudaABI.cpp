@@ -446,7 +446,7 @@ void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
   LLVM_DEBUG(dbgs() << "*** finished processing outlined call.\n");
 }
 
-CudaABI::CudaABI(Module &M, const TTOptions &TTO)
+CudaABI::CudaABI(Module &M, const TTOptions &TTO, ModuleAnalysisManager &AM)
     : TapirTarget(M, TTO), KernelModule("", M.getContext()), NextKernelID(0) {
   LLVM_DEBUG(dbgs() << "cuabi: CudaABI::CudaABI()\n");
 

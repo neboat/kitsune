@@ -73,7 +73,7 @@ class TTOptions;
 /// loops will be converted to GPU kernels.
 class CudaABI : public TapirTarget {
 public:
-  CudaABI(Module &HostM, const TTOptions &TTO);
+  CudaABI(Module &HostM, const TTOptions &TTO, ModuleAnalysisManager &AM);
   ~CudaABI();
 
   Value *lowerGrainsizeCall(CallInst *GrainsizeCall) override final;
