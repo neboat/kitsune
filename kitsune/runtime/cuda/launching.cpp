@@ -194,7 +194,8 @@ void __kitcuda_refine_launch_params(size_t trip_count, CUfunction cu_func,
     // at that number in comparison to the number of SMs.
     int block_count = (trip_count + threads_per_blk - 1) / threads_per_blk;
     float sm_load = ((float)block_count / num_multiprocs) * 100.0;
-
+    bool memory_bound = (4 * inst_mix->numMemoryOps >
+                         2 * inst_mix->numFlops + inst_mix->numIntOps);
     if (__kitrt_verbose_mode()) {
       fprintf(stderr,
               "kitcuda: Kernel Launch SM Load Details --------------\n");
@@ -202,6 +203,10 @@ void __kitcuda_refine_launch_params(size_t trip_count, CUfunction cu_func,
       fprintf(stderr, "  Kernel trip count:    %ld\n", trip_count);
       fprintf(stderr, "  Occupancy-driven TPB: %d\n", threads_per_blk);
       fprintf(stderr, "  SM utilization:  %3.2f%%\n", sm_load);
+      fprintf(stderr, "  Memory ops:           %ld\n", inst_mix->numMemoryOps);
+      fprintf(stderr, "  FLOPS:                %ld\n", inst_mix->numFlops);
+      fprintf(stderr, "  IOPS:                 %ld\n", inst_mix->numIntOps);
+      fprintf(stderr, "  Other ops:            %ld\n", inst_mix->numOtherOps);
     }
     // If we are under-utilizing the available SMs on the GPU we reduce the
     // threads-per-block count until we hit a decent utilization (i.e., we
@@ -212,13 +217,16 @@ void __kitcuda_refine_launch_params(size_t trip_count, CUfunction cu_func,
     //
     // As a starting point we will adjust launch parameters if we are utilizing
     // less than 75% of the GPU's SMs.  TODO: Make this a tweak-able parameter?
-    if (sm_load < 85) {
+    if (sm_load < 75 || (memory_bound && sm_load < 250)) {
+      KIT_VERBOSE_PRINT("  ***-GPU is underutilized -- adjusting block size...\n");
       int warp_size = 0;
       CU_SAFE_CALL(cuDeviceGetAttribute_p(
           &warp_size, CU_DEVICE_ATTRIBUTE_WARP_SIZE, _kitcuda_device_id));
+      int target_multiprocs =
+          memory_bound ? 3 * num_multiprocs : 2 * num_multiprocs;
       int warps_per_sm = 4;
       int min_tpb = warp_size * warps_per_sm;
-      while (block_count < num_multiprocs && threads_per_blk > min_tpb) {
+      while (block_count < target_multiprocs && threads_per_blk > min_tpb) {
         threads_per_blk = next_lowest_factor(threads_per_blk, min_tpb);
         block_count = (trip_count + threads_per_blk - 1) / threads_per_blk;
         sm_load = ((float)block_count / num_multiprocs) * 100.0;
