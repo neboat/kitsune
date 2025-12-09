@@ -16,6 +16,7 @@
 
 #include "kitsune/Core/Tapir.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/Transforms/Utils/ValueMapper.h"
 
@@ -70,7 +71,8 @@ void cloneUsedGlobalVariablesInto(
 ///             cloned into the device module
 void cloneReachableFuncsInto(Module &devM,
                              const std::set<GlobalValue *> &usedGlobalValues,
-                             ValueToValueMapTy &vmap);
+                             ValueToValueMapTy &vmap,
+                             const TargetLibraryInfo &TLI);
 
 /// Clone IFuncs that are transitively reachable from outlined tapir loops from
 /// the host to the device module.

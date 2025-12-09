@@ -16,6 +16,8 @@
 #include "kitsune/Core/EmbUtils.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Analysis/TargetLibraryInfo.h"
+#include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/Demangle/Demangle.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DebugInfo.h"
@@ -175,9 +177,18 @@ void llvm::cloneUsedGlobalVariablesInto(
   }
 }
 
+static bool cannotRenameFunction(const Function *F,
+                                 const TargetLibraryInfo &TLI) {
+  if (F->isIntrinsic() || F->getName() == "__kitcuda_get_scan_view" ||
+      F->getName() == "__kitcuda_scan")
+    return true;
+  LibFunc LibF;
+  return TLI.getLibFunc(F->getName(), LibF);
+}
+
 void llvm::cloneReachableFuncsInto(
     Module &devM, const std::set<GlobalValue *> &usedGlobalValues,
-    ValueToValueMapTy &vmap) {
+    ValueToValueMapTy &vmap, const TargetLibraryInfo &TLI) {
   // Functions that are called from the tapir loop must be cloned into the
   // kernel module, especially if they contain a body. This is a two-step
   // process - first we create a declaration for the functions since these may
@@ -186,8 +197,10 @@ void llvm::cloneReachableFuncsInto(
   for (GlobalValue *g : usedGlobalValues) {
     if (auto *f = dyn_cast<Function>(g)) {
       std::string fname(f->getName());
+      std::string devfname =
+          cannotRenameFunction(f, TLI) ? fname : fname + "_dev";
       Function *devf = cast<Function>(
-          devM.getOrInsertFunction(fname, f->getFunctionType()).getCallee());
+          devM.getOrInsertFunction(devfname, f->getFunctionType()).getCallee());
       for (unsigned i = 0; i < f->arg_size(); ++i) {
         Argument *a = f->getArg(i);
         Argument *deva = devf->getArg(i);

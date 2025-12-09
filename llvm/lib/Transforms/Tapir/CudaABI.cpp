@@ -174,10 +174,11 @@ static std::string convertNameForPTX(StringRef name, bool addPrefix = true) {
 }
 
 CudaLoop::CudaLoop(Module &M, Module &KernelModule, const std::string &KN,
-                   ValueToValueMapTy &GVMap, const TTOptions &TTOpts)
+                   ValueToValueMapTy &GVMap, const TTOptions &TTOpts,
+                   const TargetLibraryInfo &TLI)
     : LoopOutlineProcessor(M, KernelModule, TTOpts,
                            CloneFunctionChangeType::DifferentModule),
-      KernelName(KN), KernelModule(KernelModule), GVMap(GVMap) {
+      KernelName(KN), KernelModule(KernelModule), GVMap(GVMap), TLI(TLI) {
   LLVM_DEBUG(dbgs() << "debug[cuabi]: creating a cuda loop outliner.\n"
                     << "  - target kernel name: " << KernelName << "\n");
 
@@ -818,8 +819,13 @@ void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
 CudaABI::CudaABI(Module &M, const TTOptions &TTO, ModuleAnalysisManager &AM)
     : TapirTarget(M, TTO), KernelModule("", M.getContext()), NextKernelID(0) {
   LLVM_DEBUG(dbgs() << "cuabi: CudaABI::CudaABI()\n");
+  auto &FAM = AM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
+  GetTLI = [&FAM](Function &F) -> TargetLibraryInfo & {
+    return FAM.getResult<TargetLibraryAnalysis>(F);
+  };
 
   TargetMachine *TM = createTargetMachine(TTID::Cuda, TTO);
+  KernelModule.setSourceFileName(M.getSourceFileName());
   KernelModule.setTargetTriple(TM->getTargetTriple());
   KernelModule.setDataLayout(TM->createDataLayout());
 
@@ -933,5 +939,6 @@ CudaABI::getLoopOutlineProcessor(const TapirLoopInfo *TL) {
   std::string KernelName = convertNameForPTX(
       getNameForTapirLoop(*TL, CUABI_KERNEL_NAME_PREFIX, NextKernelID++),
       /*AddPrefix=*/false);
-  return new CudaLoop(M, KernelModule, KernelName, GVMap, this->getOptions());
+  return new CudaLoop(M, KernelModule, KernelName, GVMap, this->getOptions(),
+                      GetTLI(*TL->getLoop()->getHeader()->getParent()));
 }

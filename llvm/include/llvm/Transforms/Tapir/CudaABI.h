@@ -121,6 +121,8 @@ private:
   /// fixed base with an integer suffix that is incremented for each tapir loop
   /// that is encountered.
   unsigned NextKernelID = 0;
+
+  std::function<TargetLibraryInfo &(Function &)> GetTLI;
 };
 
 /// The loop outline process for transforming a Tapir parallel loop into a
@@ -154,6 +156,8 @@ private:
 
   ValueToValueMapTy &GVMap;
 
+  const TargetLibraryInfo &TLI;
+
   // Some bookkeeping for reduction variables that would allow recreation of
   // reducer lookup call at the outlined loop call site.
   struct ReducerOutlineLoopCallInfo {
@@ -181,7 +185,8 @@ public:
   ///                   which the loop is outlined
   /// @param TTOpts The tapir target options
   CudaLoop(Module &M, Module &KernelModule, const std::string &KernelName,
-           ValueToValueMapTy &GVMap, const TTOptions &TTOpts);
+           ValueToValueMapTy &GVMap, const TTOptions &TTOpts,
+           const TargetLibraryInfo &TLI);
   ~CudaLoop();
 
   void fixReducersInKernel(Function *KernelF, Value *ThreadIdx, Value *BlockDim,
