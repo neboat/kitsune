@@ -761,6 +761,16 @@ static Attr *handleTapirStrategyAttr(Sema &S, Stmt *St, const ParsedAttr &A,
   return ::new (S.Context) TapirStrategyAttr(S.Context, A, strategyKind);
 }
 
+static Attr *handleTapirDeferredSyncAttr(Sema &S, Stmt *St, const ParsedAttr &A,
+                                         SourceRange Range) {
+  if (St->getStmtClass() == Stmt::ForallStmtClass ||
+      St->getStmtClass() == Stmt::CXXForallRangeStmtClass)
+    return ::new (S.Context) TapirDeferredSyncAttr(S.Context, A);
+
+  S.Diag(A.getLoc(), diag::err_tapir_target_attr_unsupported_stmt);
+  return nullptr;
+}
+
 // FIXME: Should we change this attribute name? If we don't expect anything
 // other than threads per block to be passed here, should we just call it that
 // instead.
@@ -857,6 +867,8 @@ static Attr *ProcessStmtAttribute(Sema &S, Stmt *St, const ParsedAttr &A,
     return handleTapirTargetAttr(S, St, A, Range);
   case ParsedAttr::AT_KitsuneLaunch:
     return handleKitsuneLaunchAttr(S, St, A, Range);
+  case ParsedAttr::AT_TapirDeferredSync:
+    return handleTapirDeferredSyncAttr(S, St, A, Range);
   default:
     if (Attr *AT = nullptr; A.getInfo().handleStmtAttribute(S, St, A, AT) !=
                             ParsedAttrInfo::NotHandled) {

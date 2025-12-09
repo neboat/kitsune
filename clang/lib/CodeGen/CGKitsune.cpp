@@ -320,7 +320,11 @@ void CodeGenFunction::EmitForallStmt(const ForallStmt &S,
     if (ThreadsPerBlock > 0)
       LoopStack.setLoopThreadsPerBlock(ThreadsPerBlock);
   }
-
+  for (const auto *curAttr : Attrs) {
+    if (curAttr->getKind() == attr::TapirDeferredSync) {
+      LoopStack.setDeferredSync(true);
+    }
+  }
   // New basic blocks and jump destinations with Tapir terminators
   llvm::BasicBlock *Detach = createBasicBlock("forall.detach");
   JumpDest Reattach = getJumpDestInCurrentScope("forall.reattach");

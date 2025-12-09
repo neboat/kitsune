@@ -54,6 +54,7 @@ private:
   static constexpr StringRef nameThreadsPerBlock =
       "tapir.loop.threads.per.block";
   static constexpr StringRef nameAutotuneLaunch = "tapir.loop.autotune.launch";
+  static constexpr StringRef nameDeferredSync = "tapir.loop.deferred.sync";
 
   /// All tapir loop hints. Every known loop hint must contain an entry in this
   /// map, even if a hint is not found in the metadata. When adding support for
@@ -62,7 +63,8 @@ private:
                  {nameGrainSize, defaultTapirGrainSize},
                  {nameLoopTarget, defaultTapirTarget},
                  {nameThreadsPerBlock, 0U},
-                 {nameAutotuneLaunch, false}};
+                 {nameAutotuneLaunch, false},
+                 {nameDeferredSync, false}};
 
   /// Check if the value can be serialized to metadata. Some hints cannot
   /// currently be serialized - for instance, those with optional values when
@@ -109,6 +111,10 @@ public:
 
   bool getAutotuneLaunch() const {
     return std::get<bool>(hints.at(nameAutotuneLaunch));
+  }
+
+  bool getDeferredSync() const {
+    return std::get<bool>(hints.at(nameDeferredSync));
   }
 
   /// Clear Tapir hints from the loop's metadata.

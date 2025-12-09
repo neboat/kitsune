@@ -74,6 +74,8 @@ bool llvm::TapirLoopHints::validate(StringRef name, unsigned v) {
     return v <= KITSUNE_MAX_FIXED_THREADS_PER_BLOCK;
   } else if (name == nameAutotuneLaunch) {
     return true;
+  } else if (name == nameDeferredSync) {
+    return true;
   } else {
     llvm_unreachable("TapirLoopHints::validate: Name not handled");
   }
@@ -120,6 +122,8 @@ void llvm::TapirLoopHints::setHint(StringRef name, Metadata *arg) {
   else if (name == nameThreadsPerBlock)
     hints[name] = val;
   else if (name == nameAutotuneLaunch)
+    hints[name] = bool(val);
+  else if (name == nameDeferredSync)
     hints[name] = bool(val);
   else
     llvm_unreachable("TapirLoopHints::setHint: Hint name not handled");

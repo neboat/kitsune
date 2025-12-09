@@ -5298,3 +5298,11 @@ def KitsuneMobile : TypeAttr {
                    C23<"kitsune", "mobile">];
   let Documentation = [KitsuneMobileDocs];
 }
+
+def TapirDeferredSync : StmtAttr {
+  let Spellings = [CXX11<"tapir","deferred_sync">];
+  let Subjects = SubjectList<[ForallStmt, CXXForallRangeStmt],
+                             ErrorDiag, "'forall' statements">;
+  let Args = [];
+  let Documentation = [TapirRTDocs];
+}

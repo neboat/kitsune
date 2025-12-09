@@ -80,6 +80,9 @@ struct TapirLoopAttributes {
   /// has been compiled to a GPU kernel. Only relevant for the GPU-centric
   /// tapir targets.
   unsigned ThreadsPerBlock = 0;
+
+  /// Value for the tapir.loop.deferred.sync metadata.
+  bool DeferredSync = false;
 };
 
 /// Attributes that may be specified on loops.
@@ -381,6 +384,8 @@ public:
   void setLoopThreadsPerBlock(unsigned TPB) {
     StagedAttrs.TapirLoopAttrs->ThreadsPerBlock = TPB;
   }
+
+  void setDeferredSync(bool v) { StagedAttrs.TapirLoopAttrs->DeferredSync = v; }
 
 private:
   /// Returns true if there is LoopInfo on the stack.

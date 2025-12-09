@@ -57,11 +57,26 @@
 #include <deque>
 #include <algorithm>
 
+extern "C" { // Taken from cheetah
+typedef void (*__cilk_identity_fn)(void *);
+typedef void (*__cilk_reduce_fn)(void *, void *);
+
+void __cilkrts_reducer_register_2(void *key, size_t size, __cilk_identity_fn id,
+                                  __cilk_reduce_fn reduce);
+void __cilkrts_reducer_unregister(void *key);
+}
 
 // Stream creation can be expensive.  We "recycle" them when possible. 
-typedef std::deque<CUstream> KitCudaStreamList;
+struct KitCudaStreamEvent {
+  CUstream stream;
+  CUevent event;
+};
+
+typedef kitrt::deque<KitCudaStreamEvent *> KitCudaStreamList;
+// typedef std::deque<CUstream> KitCudaStreamList;
 static KitCudaStreamList _kitcuda_streams;
 static std::mutex _kitcuda_stream_mutex;
+static KitCudaStreamEvent *_kitcuda_stream_event;
 
 #ifdef __cplusplus
 extern "C" {
@@ -69,24 +84,91 @@ extern "C" {
 #include <stdbool.h>
 #endif
 
-void *__kitcuda_get_thread_stream() {
-  KIT_NVTX_PUSH("kitcuda:get_thread_stream", KIT_NVTX_STREAM);
+#define KITCUDA_ASYNC_STREAM_JOIN
 
-  CUstream cu_stream;
-  if (not _kitcuda_streams.empty()) {
-    // LOCK
-    _kitcuda_stream_mutex.lock();
-    cu_stream = _kitcuda_streams.front();
+KitCudaStreamEvent *__kitcuda_stream_event_claim() {
+  KitCudaStreamEvent *stream_event;
+  _kitcuda_stream_mutex.lock();
+  if (!_kitcuda_streams.empty()) {
+    stream_event = _kitcuda_streams.front();
     _kitcuda_streams.pop_front();
     _kitcuda_stream_mutex.unlock();
-    // UNLOCK 
+    KIT_VERBOSE_PRINT("kitcuda stream_event_claim: reusing thread stream.\n");
   } else {
-    CU_SAFE_CALL(cuStreamCreate(&cu_stream, CU_STREAM_NON_BLOCKING));
+    _kitcuda_stream_mutex.unlock();
+    stream_event = reinterpret_cast<KitCudaStreamEvent *>(
+        malloc(sizeof(KitCudaStreamEvent)));
+    KIT_VERBOSE_PRINT("kitcuda stream_event_claim: creating new thread stream.\n");
+    CU_SAFE_CALL(
+        cuStreamCreate_p(&stream_event->stream, CU_STREAM_NON_BLOCKING));
+    CU_SAFE_CALL(cuEventCreate(&stream_event->event, CU_EVENT_DEFAULT));
   }
-  
-  KIT_NVTX_POP();
+  return stream_event;
+}
+
+void __kitcuda_stream_event_identity(void *se_raw) {
+  auto *se = reinterpret_cast<KitCudaStreamEvent **>(se_raw);
+  *se = __kitcuda_stream_event_claim();
+}
+
+void __kitcuda_stream_event_recycle(KitCudaStreamEvent *se) {
+  _kitcuda_stream_mutex.lock();
+  KIT_VERBOSE_PRINT("kitcuda stream_event_recycle: recycling stream %p\n", se->stream);
+  _kitcuda_streams.push_back(se);
+  _kitcuda_stream_mutex.unlock();
+}
+
+void __kitcuda_stream_event_merge(void *se_left_raw, void *se_right_raw) {
+  auto **se_left = reinterpret_cast<KitCudaStreamEvent **>(se_left_raw);
+  auto **se_right = reinterpret_cast<KitCudaStreamEvent **>(se_right_raw);
+  KIT_VERBOSE_PRINT("kitcuda stream_event_merge: left stream %p, right stream %p\n", (*se_left)->stream, (*se_right)->stream);
+#ifdef KITCUDA_ASYNC_STREAM_JOIN
+  CU_SAFE_CALL(cuEventRecord((*se_right)->event, (*se_right)->stream));
+  CU_SAFE_CALL(cuStreamWaitEvent((*se_left)->stream, (*se_right)->event,
+                                   CU_EVENT_WAIT_DEFAULT));
+  // CU_SAFE_CALL(cuLaunchHostFunc_p(
+  //     (*se_left)->stream,
+  //     reinterpret_cast<CUhostFn>(__kitcuda_stream_event_recycle),
+  //     (void *)*se_right));
+#else
+  CU_SAFE_CALL(cuStreamSynchronize_p((*se_right)->stream));
+#endif
+  __kitcuda_stream_event_recycle(*se_right);
+
+  *se_right = nullptr;
+}
+
+void *__kitcuda_get_thread_stream() {
+  KIT_NVTX nvtx_raii("kitcuda:get_thread_stream", KIT_NVTX_STREAM);
+  CUstream cu_stream;
+  auto **se = reinterpret_cast<KitCudaStreamEvent **>(__hyper_lookup(
+      &_kitcuda_stream_event, sizeof(_kitcuda_stream_event),
+      __kitcuda_stream_event_identity, __kitcuda_stream_event_merge));
+  cu_stream = (*se)->stream;
+  KIT_VERBOSE_PRINT("returning thread stream: %p\n", cu_stream);
   return (void *)cu_stream;
 }
+
+// void *__kitcuda_get_thread_stream() {
+//   KIT_NVTX nvtx_raii("kitcuda:get_thread_stream", KIT_NVTX_STREAM);
+
+//   KIT_VERBOSE_PRINT("kitcuda get_thread_stream\n");
+
+//   CUstream cu_stream;
+//   if (not _kitcuda_streams.empty()) {
+//     // LOCK
+//     _kitcuda_stream_mutex.lock();
+//     cu_stream = _kitcuda_streams.front();
+//     _kitcuda_streams.pop_front();
+//     _kitcuda_stream_mutex.unlock();
+//     // UNLOCK
+//   } else {
+//     CU_SAFE_CALL(cuStreamCreate(&cu_stream, CU_STREAM_NON_BLOCKING));
+//   }
+
+//   KIT_VERBOSE_PRINT("[kitcuda_get_thread_stream] -> %p\n", cu_stream);
+//   return (void *)cu_stream;
+// }
 
 void __kitcuda_sync_thread_stream(void *opaque_stream) {
   assert(opaque_stream != nullptr && "unexpected null stream pointer!");
@@ -97,12 +179,13 @@ void __kitcuda_sync_thread_stream(void *opaque_stream) {
   CUstream stream = (CUstream)opaque_stream;
   CU_SAFE_CALL(cuStreamSynchronize_p(stream));
 
-  // LOCK
-  _kitcuda_stream_mutex.lock();
-  _kitcuda_streams.push_back(stream);
-  _kitcuda_stream_mutex.unlock();
-  // UNLOCK
+  // // LOCK
+  // _kitcuda_stream_mutex.lock();
+  // _kitcuda_streams.push_back(stream);
+  // _kitcuda_stream_mutex.unlock();
+  // // UNLOCK
   
+  KIT_VERBOSE_PRINT("[kitcuda_sync_thread_stream] done\n");
 }
 
 void __kitcuda_sync_context() {
@@ -117,22 +200,31 @@ void __kitcuda_sync_context() {
   CU_SAFE_CALL(cuCtxSynchronize_p());
 }
 
-void __kitcuda_delete_thread_stream(void *opaque_stream) {
-  KIT_NVTX_PUSH("kitrt:delete_thread_stream", KIT_NVTX_STREAM);
-  CUstream stream = (CUstream)opaque_stream;
-
-  // LOCK 
-  _kitcuda_stream_mutex.lock();
-  auto sit = std::find(_kitcuda_streams.begin(), _kitcuda_streams.end(), stream);
-  if (sit != _kitcuda_streams.end()) {
-    _kitcuda_streams.erase(sit);
-  }
-  CU_SAFE_CALL(cuStreamDestroy_v2_p(stream));
-  _kitcuda_stream_mutex.unlock();
-  // UNLOCK
-  
-  KIT_NVTX_POP();
+void __kitcuda_initialize_thread_streams() {
+  _kitcuda_stream_event = __kitcuda_stream_event_claim();
+  // __cilkrts_reducer_register_2(
+  //     &_kitcuda_stream_event, sizeof(_kitcuda_stream_event),
+  //     __kitcuda_stream_event_identity, __kitcuda_stream_event_merge);
 }
+
+// void __kitcuda_delete_thread_stream(void *opaque_stream) {
+//   KIT_NVTX nvtx_raii("kitrt:delete_thread_stream", KIT_NVTX_STREAM);
+//   CUstream stream = (CUstream)opaque_stream;
+
+//   KIT_VERBOSE_PRINT("kitcuda delete_thread_stream %p\n", opaque_stream);
+
+//   // LOCK
+//   _kitcuda_stream_mutex.lock();
+//   auto sit = std::find(_kitcuda_streams.begin(), _kitcuda_streams.end(), stream);
+//   if (sit != _kitcuda_streams.end()) {
+//     _kitcuda_streams.erase(sit);
+//   }
+//   CU_SAFE_CALL(cuStreamDestroy_v2_p(stream));
+//   _kitcuda_stream_mutex.unlock();
+//   // UNLOCK
+  
+//   KIT_VERBOSE_PRINT("[kitcuda_delete_thread_stream] done\n");
+// }
 
 void __kitcuda_destroy_thread_streams() {
   KIT_NVTX nvtx_raii("kitrt:delete_thread_streams", KIT_NVTX_STREAM);
@@ -142,13 +234,31 @@ void __kitcuda_destroy_thread_streams() {
   // LOCK 
   _kitcuda_stream_mutex.lock();
  
-  for (auto &entry : _kitcuda_streams)
-    CU_SAFE_CALL(cuStreamDestroy_v2_p(entry));
+  // for (auto &entry : _kitcuda_streams)
+  //   CU_SAFE_CALL(cuStreamDestroy_v2_p(entry));
+  // _kitcuda_streams.clear();
+
+  for (auto &entry : _kitcuda_streams) {
+    KIT_VERBOSE_PRINT("kitcuda destroy_thread_streams: destroying stream: %p.\n",
+              (void *)entry->stream);
+    CU_SAFE_CALL(cuStreamDestroy_v2(entry->stream));
+    CU_SAFE_CALL(cuEventDestroy_v2(entry->event));
+    free(entry);
+  }
   _kitcuda_streams.clear();
 
   _kitcuda_stream_mutex.unlock();
   // UNLOCK
   
+  KIT_VERBOSE_PRINT("kitcuda destroy_thread_streams: destroying stream event: %p.\n",
+            (void *)_kitcuda_stream_event->stream);
+  // __cilkrts_reducer_unregister(&_kitcuda_stream_event);
+  CU_SAFE_CALL(cuStreamDestroy_v2(_kitcuda_stream_event->stream));
+  CU_SAFE_CALL(cuEventDestroy_v2(_kitcuda_stream_event->event));
+  free(_kitcuda_stream_event);
+  _kitcuda_stream_event = nullptr;
+
+  KIT_VERBOSE_PRINT("[kitcuda_destroy_thread_streams] done\n");
 }
 
 } // extern "C"

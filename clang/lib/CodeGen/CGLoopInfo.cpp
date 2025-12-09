@@ -510,6 +510,8 @@ LoopInfo::getTapirLoopProperties(const LoopAttributes &Attrs) {
         Ctx, "tapir.loop.grainsize", TapirAttrs->TapirGrainSize));
     LoopProperties.push_back(makeTapirLoopMetadata<uint32_t>(
         Ctx, "tapir.loop.threads.per.block", TapirAttrs->ThreadsPerBlock));
+    LoopProperties.push_back(makeTapirLoopMetadata<uint32_t>(
+        Ctx, "tapir.loop.deferred.sync", (uint32_t)(TapirAttrs->DeferredSync)));
   }
 
   return LoopProperties;

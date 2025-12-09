@@ -387,6 +387,11 @@ extern void __kitcuda_delete_thread_stream(void *opaque_stream);
 extern void __kitcuda_destroy_thread_streams();
 
 /**
+ * Initialize thread stream global reducer object.
+ */
+extern void __kitcuda_initialize_thread_streams();
+
+/**
  * Destroy all cached device-side reducer views.
  */
 extern void __kitcuda_destroy_reducer_cache();

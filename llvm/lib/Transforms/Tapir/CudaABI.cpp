@@ -783,22 +783,25 @@ void CudaLoop::processOutlinedLoopCall(TapirLoopInfo &TL, TaskOutlineInfo &TOI,
   Builder.CreateCall(
       Intrinsic::getOrInsertDeclaration(&M, Intrinsic::kit_async_launch_kernel),
       Args);
-  Builder.CreateIntrinsic(VoidTy, Intrinsic::kit_sync_stream,
-                          {CTT, CudaStream});
-  // Synchronize any reducers used in the kernel back onto the host.
-  for (auto &[Reducer, HostLookup] : ReducerInputsHost) {
-    auto Info = ReducerInputs[Reducer];
-    Builder.CreateIntrinsic(VoidTy, Intrinsic::kit_reducer_sync,
-                            {HostLookup, Reducer,
-                             ConstantInt::get(Int64Ty, Info.Size), Info.IdFn,
-                             Info.MergeFn, CudaStream});
-  }
+  if (!Hints.getDeferredSync() ||
+      !(ReducerInputsHost.empty() && ScannerInputs.empty())) {
+    Builder.CreateIntrinsic(VoidTy, Intrinsic::kit_sync_stream,
+                            {CTT, CudaStream});
+    // Synchronize any reducers used in the kernel back onto the host.
+    for (auto &[Reducer, HostLookup] : ReducerInputsHost) {
+      auto Info = ReducerInputs[Reducer];
+      Builder.CreateIntrinsic(VoidTy, Intrinsic::kit_reducer_sync,
+                              {HostLookup, Reducer,
+                               ConstantInt::get(Int64Ty, Info.Size), Info.IdFn,
+                               Info.MergeFn, CudaStream});
+    }
 
-  // Synchronize any scanners used in the kernel.
-  for (ScannerOutlineLoopCallInfo &SOI : ScannerInputs) {
-    Builder.CreateIntrinsic(
-        VoidTy, Intrinsic::kit_scanner_sync,
-        {SOI.Aggregate, SOI.InclusivePrefix, SOI.ScanState, CudaStream});
+    // Synchronize any scanners used in the kernel.
+    for (ScannerOutlineLoopCallInfo &SOI : ScannerInputs) {
+      Builder.CreateIntrinsic(
+          VoidTy, Intrinsic::kit_scanner_sync,
+          {SOI.Aggregate, SOI.InclusivePrefix, SOI.ScanState, CudaStream});
+    }
   }
 
   // After the kernel is done, copy the non-const globals back to the host. This

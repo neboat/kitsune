@@ -253,6 +253,9 @@ bool __kitcuda_initialize() {
                         disable_refined_launches);
   if (disable_refined_launches)
     __kitcuda_enable_launch_refinement(false);
+
+  __kitcuda_initialize_thread_streams();
+
   return _kitcuda_initialized;
 }
 
