@@ -63,16 +63,27 @@
 #include "kitsune/Core/ModuleUtils.h"
 #include "kitsune/Core/TTOptions.h"
 #include "kitsune/Core/TargetUtils.h"
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Analysis/TapirLoopHints.h"
+#include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DebugInfo.h"
+#include "llvm/IR/DebugInfoMetadata.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/InstIterator.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/IntrinsicsNVPTX.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/Verifier.h"
+#include "llvm/IRReader/IRReader.h"
+#include "llvm/Linker/Linker.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Transforms/Tapir/KitsuneUtils.h"
 #include "llvm/Transforms/Tapir/TapirLoopInfo.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/Utils/TapirUtils.h"
+#include "llvm/Transforms/Utils/ValueMapper.h"
 
 using namespace llvm;
 
@@ -153,10 +164,10 @@ static std::string convertNameForPTX(StringRef name, bool addPrefix = true) {
 }
 
 CudaLoop::CudaLoop(Module &M, Module &KernelModule, const std::string &KN,
-                   const TTOptions &TTOpts)
+                   ValueToValueMapTy &GVMap, const TTOptions &TTOpts)
     : LoopOutlineProcessor(M, KernelModule, TTOpts,
                            CloneFunctionChangeType::DifferentModule),
-      KernelName(KN), KernelModule(KernelModule) {
+      KernelName(KN), KernelModule(KernelModule), GVMap(GVMap) {
   LLVM_DEBUG(dbgs() << "debug[cuabi]: creating a cuda loop outliner.\n"
                     << "  - target kernel name: " << KernelName << "\n");
 
@@ -198,7 +209,8 @@ CudaLoop::~CudaLoop() {
                     << KernelName << "'.\n");
 }
 
-void CudaLoop::preProcessTapirLoop(TapirLoopInfo &TL, ValueToValueMapTy &VMap) {
+void CudaLoop::preProcessTapirLoop(TapirLoopInfo &TL,
+                                   ValueToValueMapTy &FVMap) {
   LLVM_DEBUG(dbgs() << "debug[cuabi]: -preprocessing loop for kernel '"
                     << KernelName << "'.\n");
 
@@ -213,7 +225,7 @@ void CudaLoop::preProcessTapirLoop(TapirLoopInfo &TL, ValueToValueMapTy &VMap) {
   // NVPTX has a number of different address spaces. We do not use them and the
   // code seems to work. It is not clear if there is any advantage to using
   // them, but it may be a good idea to look into it at some point.
-  cloneUsedGlobalVariablesInto(KernelModule, UsedGlobalValues, VMap);
+  cloneUsedGlobalVariablesInto(KernelModule, UsedGlobalValues, GVMap);
 
   // ptxas imposes restrictions on the names that global entities may have.
   // Ideally, it would be good to do this in a post-processing pass, say the
@@ -223,21 +235,28 @@ void CudaLoop::preProcessTapirLoop(TapirLoopInfo &TL, ValueToValueMapTy &VMap) {
   // LLVM modules and is almost certainly not worth the trouble.
   for (GlobalValue *v : UsedGlobalValues)
     if (auto *g = dyn_cast<GlobalVariable>(v))
-      cast<GlobalVariable>(VMap[g])->setName(convertNameForPTX(g->getName()));
+      cast<GlobalVariable>(GVMap[g])->setName(convertNameForPTX(g->getName()));
 
   // The global variables have to be cloned before cloning the functions because
   // they may be used in the bodies of functions to be cloned.
-  cloneReachableFuncsInto(KernelModule, UsedGlobalValues, VMap);
-  cloneReachableIFuncsInto(KernelModule, UsedGlobalValues, VMap);
+  cloneReachableFuncsInto(KernelModule, UsedGlobalValues, GVMap, TLI);
+  cloneReachableIFuncsInto(KernelModule, UsedGlobalValues, GVMap);
 
   // The aliasee in global aliases is a global value, so they must be cloned
   // after the global variables and functions are in the vmap.
-  cloneUsedGlobalAliasesInto(KernelModule, UsedGlobalValues, VMap);
+  cloneUsedGlobalAliasesInto(KernelModule, UsedGlobalValues, GVMap);
+
+  // Copy mappings from global VMap into function-local VMap.
+  for (const auto Mapping : GVMap)
+    FVMap[Mapping.first] = Mapping.second;
+  if (GVMap.hasMD())
+    for (const auto &MDMapping : GVMap.MD())
+      FVMap.MD()[MDMapping.first] = MDMapping.second;
 }
 
 void CudaLoop::postProcessOutline(TapirLoopInfo &TLI, TaskOutlineInfo &Out,
                                   ValueToValueMapTy &VMap) {
-  LLVMContext &Ctx = M.getContext();
+  LLVMContext &Ctx = KernelModule.getContext();
   Task *T = TLI.getTask();
   Loop *TL = TLI.getLoop();
 
@@ -514,5 +533,5 @@ CudaABI::getLoopOutlineProcessor(const TapirLoopInfo *TL) {
   std::string KernelName = convertNameForPTX(
       getNameForTapirLoop(*TL, CUABI_KERNEL_NAME_PREFIX, NextKernelID++),
       /*AddPrefix=*/false);
-  return new CudaLoop(M, KernelModule, KernelName, this->getOptions());
+  return new CudaLoop(M, KernelModule, KernelName, GVMap, this->getOptions());
 }

@@ -59,7 +59,9 @@
 #ifndef LLVM_TRANSFORMS_TAPIR_CUDA_ABI_H
 #define LLVM_TRANSFORMS_TAPIR_CUDA_ABI_H
 
+#include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/Transforms/Tapir/LoweringUtils.h"
+#include "llvm/Transforms/Utils/ValueMapper.h"
 
 #include <set>
 
@@ -111,6 +113,8 @@ private:
   /// will eventually be converted to PTX and from there to executable GPU code.
   Module KernelModule;
 
+  ValueToValueMapTy GVMap;
+
   /// When outlining tapir loops into the \ref KernelModule, we need to generate
   /// a name for the outlined function. This name must be unique. In the absence
   /// of debug information, the computed outlined function name consists of a
@@ -148,6 +152,8 @@ private:
   /// functions, global variables, aliases and ifunc's.
   std::set<GlobalValue *> UsedGlobalValues;
 
+  ValueToValueMapTy &GVMap;
+
 public:
   /// Create a loop outline processor for the cuda tapir target.
   /// @param M The host module
@@ -156,7 +162,7 @@ public:
   ///                   which the loop is outlined
   /// @param TTOpts The tapir target options
   CudaLoop(Module &M, Module &KernelModule, const std::string &KernelName,
-           const TTOptions &TTOpts);
+           ValueToValueMapTy &GVMap, const TTOptions &TTOpts);
   ~CudaLoop();
 
   void preProcessTapirLoop(TapirLoopInfo &TL, ValueToValueMapTy &VMap) override;
